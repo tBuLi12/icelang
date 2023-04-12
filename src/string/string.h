@@ -6,12 +6,15 @@
 #include <ranges>
 
 template <size_t N> struct String {
-    size_t length = N - 1;
     char characters[N];
 
     constexpr String(std::ranges::input_range auto const& source)
         : characters{} {
         std::ranges::copy(source, characters);
+    }
+
+    constexpr size_t length() const noexcept {
+        return N - 1;
     }
 
     constexpr bool operator==(std::string const& other) const {
@@ -31,30 +34,17 @@ template <size_t N> struct String {
                          );
     }
 
-    template <size_t M>
-    constexpr String<M + 1> slice() const
-        requires(M < N - 1)
-    {
+    template <size_t M> constexpr String<M + 1> slice() const {
         String<M + 1> sliced{characters | std::views::take(M)};
         sliced.characters[M] = '\0';
         return sliced;
     }
 
-    template <size_t M> constexpr String<M + 1> slice() const {
-        return String<M + 1>{characters};
-    }
-
-    // template <size_t M> constexpr String<M + 1> slice() const {
-    //     String<M + 1> sliced{};
-    //     std::copy_n(characters, N - 1, sliced.characters);
-    //     return sliced;
-    // }
-
     template <size_t M>
     constexpr String<N + M - 1> operator+(String<M> const& second) {
         String<N + M - 1> summed{characters};
         std::ranges::copy(
-            second.characters, std::begin(summed.characters) + (N - 1)
+            second.characters, std::begin(summed.characters) + N - 1
         );
         return summed;
     }

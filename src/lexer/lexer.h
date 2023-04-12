@@ -52,7 +52,7 @@ template <class T> struct FoldOptional : std::optional<T> {
 template <class T> FoldOptional(std::optional<T>&&) -> FoldOptional<T>;
 
 constexpr auto escapeSequences = [] {
-    std::array<std::optional<char>, 256> escapes{'a'};
+    std::array<std::optional<char>, 256> escapes{};
     escapes['t'] = '\t';
     escapes['\''] = '\'';
     escapes['"'] = '\"';
@@ -73,7 +73,7 @@ class UnknownPunctuationError : public logs::SpannedMessage {
     )
         : logs::SpannedMessage{_span, _source}, punctuation(_punctuation) {}
 
-    void printHeaderTo(std::ostream&) override;
+    void printHeaderTo(std::ostream&) const override;
 };
 
 class UnrecognizedTokenError : public logs::SpannedMessage {
@@ -83,7 +83,7 @@ class UnrecognizedTokenError : public logs::SpannedMessage {
     UnrecognizedTokenError(Span _span, Source _source, char _character)
         : logs::SpannedMessage{_span, _source}, character(_character) {}
 
-    void printHeaderTo(std::ostream&) override;
+    void printHeaderTo(std::ostream&) const override;
 };
 
 class UnknownEscapeSequence : public logs::SpannedMessage {
@@ -93,7 +93,7 @@ class UnknownEscapeSequence : public logs::SpannedMessage {
     UnknownEscapeSequence(Span _span, Source _source, char _character)
         : logs::SpannedMessage{_span, _source}, character(_character) {}
 
-    void printHeaderTo(std::ostream&) override;
+    void printHeaderTo(std::ostream&) const override;
 };
 
 class NumericLiteralTooLarge : public logs::SpannedMessage {
@@ -101,7 +101,7 @@ class NumericLiteralTooLarge : public logs::SpannedMessage {
     NumericLiteralTooLarge(Span _span, Source _source)
         : logs::SpannedMessage{_span, _source} {}
 
-    void printHeaderTo(std::ostream&) override;
+    void printHeaderTo(std::ostream&) const override;
 };
 
 template <String... punctuations> struct WithPunctuations {
@@ -139,28 +139,25 @@ template <String... punctuations> struct WithPunctuations {
         std::vector<std::unique_ptr<logs::Message>> diagnostics{};
 
         Span currentSpan() {
-            return Span {
-                line, line, offset, column, column
-            };
+            return Span{line, line, offset - column, column, column};
         }
 
-        template <class M>
-        void logMessage(M&& message) {
-            diagnostics.push_back(std::make_unique<M>{std::move(message)});
+        template <class M> void logMessage(M&& message) {
+            diagnostics.push_back(std::make_unique<M>(std::move(message)));
         }
 
         int nextCharacter() {
-            int next = source.stream.get();
+            int nextCharacter = source.stream.get();
             offset++;
 
-            if (next == '\n') {
+            if (nextCharacter == '\n') {
                 column = 0;
                 line++;
             } else {
                 column++;
             }
 
-            return next;
+            return nextCharacter;
         }
 
         int currentCharacter() const {
@@ -172,14 +169,14 @@ template <String... punctuations> struct WithPunctuations {
             requires((punctuations.startsWith(prefix) || ...))
         {
             auto token = (FoldOptional<Token>{} || ... || [this] {
-                if (punctuations.length > prefix.length &&
-                    currentCharacter() == punctuations[prefix.length]) {
+                if (punctuations.length() > prefix.length() &&
+                    currentCharacter() == punctuations[prefix.length()]) {
                     nextCharacter();
 
-                    static constexpr auto sliced =
-                        punctuations.template slice<(prefix.length + 1)>();
+                    static constexpr auto longerPrefix =
+                        punctuations.template slice<(prefix.length() + 1)>();
                     return FoldOptional{
-                        tryParsePunctuationWithPrefix<sliced>(),
+                        tryParsePunctuationWithPrefix<longerPrefix>(),
                     };
                 }
                 return FoldOptional<Token>{};
@@ -193,20 +190,14 @@ template <String... punctuations> struct WithPunctuations {
                 return Punctuation<prefix>{};
             }
 
-            logMessage(
-                    UnknownPunctuationError{
-                    Span{
-                        line,
-                        line,
-                        offset - column,
-                        column - prefix.length,
-                        column,
-                    },
-                    source,
-                    std::string{prefix.characters} +
-                        std::string{static_cast<char>(nextCharacter())},
-                }
-            );
+            auto unknownPuncutation = std::string{prefix.characters} +
+                                      static_cast<char>(nextCharacter());
+
+            logMessage(UnknownPunctuationError{
+                currentSpan().extendBack(prefix.length() + 1),
+                source,
+                std::move(unknownPuncutation),
+            });
 
             return {};
         }
@@ -222,10 +213,11 @@ template <String... punctuations> struct WithPunctuations {
                 return {};
             }
 
-            if (currentCharacter() == '\\') {
+            if (currentCharacter() == '/') {
                 nextCharacter();
-                if (currentCharacter() == '\\') {
+                if (currentCharacter() == '/') {
                     discardComment();
+                    return {};
                 } else {
                     return tryParsePunctuationWithPrefix<"/">();
                 }
@@ -243,7 +235,7 @@ template <String... punctuations> struct WithPunctuations {
             }
         }
 
-        void trimLeadingWhitespace() {
+        void discardLeadingWhitespace() {
             while (std::isspace(currentCharacter())) {
                 nextCharacter();
             }
@@ -254,6 +246,7 @@ template <String... punctuations> struct WithPunctuations {
             while (std::isalnum(currentCharacter())) {
                 word.push_back(nextCharacter());
             }
+
             return std::move(word);
         }
 
@@ -277,7 +270,7 @@ template <String... punctuations> struct WithPunctuations {
         }
 
         bool checkedAdd(size_t& first, size_t second) {
-            if (std::numeric_limits<size_t>::max - second < first) {
+            if (std::numeric_limits<size_t>::max() - second < first) {
                 return false;
             }
             first += second;
@@ -285,7 +278,7 @@ template <String... punctuations> struct WithPunctuations {
         }
 
         bool checkedTimesTen(size_t& factor) {
-            if (std::numeric_limits<size_t>::max / 10 < factor) {
+            if (std::numeric_limits<size_t>::max() / 10 < factor) {
                 return false;
             }
             factor *= 10;
@@ -305,7 +298,7 @@ template <String... punctuations> struct WithPunctuations {
                 if (!checkedTimesTen(value) || !checkedAdd(value, digit)) {
                     discardNumericLiteralTail();
                     logMessage(NumericLiteralTooLarge{
-                        beginSpan.to(currentSpan),
+                        beginSpan.to(currentSpan()),
                         source,
                     });
                     break;
@@ -324,21 +317,19 @@ template <String... punctuations> struct WithPunctuations {
             std::string literal{};
 
             while (currentCharacter() != '"') {
-                char next = nextCharacter();
-                if (next == '\\') {
-                    char escapedCharacter = nextCharacter();
-                    auto escape = escapeSequences[escapedCharacter];
-                    if (escape) {
-                        literal.push_back(escape.value());
+                char character = nextCharacter();
+                if (character == '\\') {
+                    char escapee = nextCharacter();
+                    auto resolved = escapeSequences[escapee];
+                    if (resolved) {
+                        literal.push_back(resolved.value());
                     } else {
                         logMessage(UnknownEscapeSequence{
-                            Span{line, line, offset, column - 1, column},
-                            Source{source},
-                            escapedCharacter
-                        });
+                            currentSpan().extendBack(2), Source{source},
+                            escapee});
                     }
                 } else {
-                    literal.push_back(next);
+                    literal.push_back(character);
                 }
             };
             nextCharacter();
@@ -349,7 +340,7 @@ template <String... punctuations> struct WithPunctuations {
         Token parseNextToken() {
             while (true) {
                 size_t offsetBeforeTrying = offset;
-                trimLeadingWhitespace();
+                discardLeadingWhitespace();
 
                 auto token = tryParseKeywordOrIdentifier();
                 if (token) {
@@ -377,7 +368,7 @@ template <String... punctuations> struct WithPunctuations {
 
                 if (offsetBeforeTrying == offset) {
                     logMessage(UnrecognizedTokenError{
-                        Span{line, line, offset, column - 1, column},
+                        currentSpan().extendBack(1),
                         source,
                         static_cast<char>(nextCharacter()),
                     });

@@ -14,12 +14,16 @@ struct Span {
     size_t endHighlightOffset;
 
     Span to(Span other);
+    Span extendBack(size_t offset);
 };
 
 struct Source {
     std::istream& stream;
     std::string_view name;
 };
+
+static constexpr auto setRedColor = "\u001b[31;1m";
+static constexpr auto resetColor = "\u001b[0m";
 
 struct Red {
     std::string_view text;
@@ -30,22 +34,24 @@ std::ostream& operator<<(std::ostream& stream, Red redText);
 namespace logs {
 class Message {
   public:
-    virtual void printTo(std::ostream&) = 0;
+    virtual void printTo(std::ostream&) const = 0;
     virtual ~Message() = default;
 };
 
 class SpannedMessage : public Message {
-    struct Formatter;
-
-  protected:
-    Span span;
-    Source source;
-
   public:
     SpannedMessage(Span _span, Source _source) : span(_span), source(_source) {}
 
-    virtual void printHeaderTo(std::ostream&) = 0;
-    void printTo(std::ostream&) override;
+    virtual void printHeaderTo(std::ostream&) const = 0;
+    void printTo(std::ostream&) const override;
+
+    Span span;
+
+  protected:
+    Source source;
+
+  private:
+    struct Formatter;
 };
 } // namespace logs
 
