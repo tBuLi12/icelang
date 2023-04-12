@@ -34,12 +34,6 @@ template <size_t N> struct String {
                          );
     }
 
-    template <size_t M> constexpr String<M + 1> slice() const {
-        String<M + 1> sliced{characters | std::views::take(M)};
-        sliced.characters[M] = '\0';
-        return sliced;
-    }
-
     template <size_t M>
     constexpr String<N + M - 1> operator+(String<M> const& second) {
         String<N + M - 1> summed{characters};
@@ -58,6 +52,13 @@ template <size_t N> struct String {
         return characters[index];
     }
 };
+
+template <size_t M, size_t N>
+constexpr String<M + 1> truncate(String<N> const& string) {
+    String<M + 1> truncated{string.characters | std::views::take(M)};
+    truncated.characters[M] = '\0';
+    return truncated;
+}
 
 template <size_t N, size_t M>
 constexpr String<N + M - 1>

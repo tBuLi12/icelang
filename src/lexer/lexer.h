@@ -148,13 +148,13 @@ template <String... punctuations> struct WithPunctuations {
 
         int nextCharacter() {
             int nextCharacter = source.stream.get();
-            offset++;
+            ++offset;
 
             if (nextCharacter == '\n') {
                 column = 0;
-                line++;
+                ++line;
             } else {
-                column++;
+                ++column;
             }
 
             return nextCharacter;
@@ -174,7 +174,7 @@ template <String... punctuations> struct WithPunctuations {
                     nextCharacter();
 
                     static constexpr auto longerPrefix =
-                        punctuations.template slice<(prefix.length() + 1)>();
+                        truncate<prefix.length() + 1>(punctuations);
                     return FoldOptional{
                         tryParsePunctuationWithPrefix<longerPrefix>(),
                     };
