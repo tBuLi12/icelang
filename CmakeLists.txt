@@ -25,8 +25,8 @@ include_directories(${PROJECT_SOURCE_DIR}/src/lexer)
 include_directories(${PROJECT_SOURCE_DIR}/src/logs)
 
 add_executable(
-  lexerTest
-  ${PROJECT_SOURCE_DIR}/tests/lexer/testLexer.cpp
+  lexerTests
+  ${PROJECT_SOURCE_DIR}/tests/lexer/lexerTests.cpp
   ${PROJECT_SOURCE_DIR}/src/lexer/lexer.cpp
   ${PROJECT_SOURCE_DIR}/src/logs/logs.cpp
 )
@@ -38,7 +38,7 @@ add_executable(
 )
 
 target_link_libraries(
-  lexerTest
+  lexerTests
   GTest::gtest_main
 )
 
@@ -48,5 +48,5 @@ target_link_libraries(
 )
 
 include(GoogleTest)
-gtest_discover_tests(lexerTest)
+gtest_discover_tests(lexerTests)
 gtest_discover_tests(logsTests)

@@ -3,7 +3,7 @@
 #include "lexer.h"
 #include <gtest/gtest.h>
 
-TEST(LexerTest, KeywordTest) {
+TEST(LexerTest, Keywords) {
     using Lexer = lexer::WithPunctuations<".", ",">::Lexer<"fun", "if">;
     std::stringstream source{", fun word if other"};
     Lexer lexer{Source{
