@@ -323,19 +323,17 @@ template <String... punctuations> struct WithPunctuations {
             return Identifier{word, currentSpan().extendBack(word.length())};
         }
 
-        bool checkedAdd(size_t& first, size_t second) {
-            if (std::numeric_limits<size_t>::max() - second < first) {
+        static bool tryPushDigit(size_t& number, size_t digit) {
+            if (std::numeric_limits<size_t>::max() / 10 < number) {
                 return false;
             }
-            first += second;
-            return true;
-        }
+            number *= 10;
 
-        bool checkedTimesTen(size_t& factor) {
-            if (std::numeric_limits<size_t>::max() / 10 < factor) {
+            if (std::numeric_limits<size_t>::max() - number < digit) {
                 return false;
             }
-            factor *= 10;
+            number += digit;
+
             return true;
         }
 
@@ -349,7 +347,7 @@ template <String... punctuations> struct WithPunctuations {
 
             do {
                 size_t digit = static_cast<size_t>(getNextCharacter()) - '0';
-                if (!checkedTimesTen(value) || !checkedAdd(value, digit)) {
+                if (!tryPushDigit(value, digit)) {
                     discardNumericLiteralTail();
                     logMessage<NumericLiteralTooLarge>(beginSpan.to(currentSpan(
                     )));
