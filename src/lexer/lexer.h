@@ -123,23 +123,51 @@ template <String... punctuations> struct WithPunctuations {
             Keyword<keywords>..., Punctuation<punctuations>...,
             literal::Numeric, literal::String, Identifier, EndOfFile>;
 
-        Lexer(Source _source) : source(_source) {
-            currentToken = parseNextToken();
-        }
-
-        Token const& peek() const noexcept {
-            return currentToken;
-        }
-
-        Token next() {
-            return std::exchange(currentToken, parseNextToken());
-        }
+        Lexer(Source _source) : source(_source) {}
 
         void printDiagnosticsTo(std::ostream& stream) {
             for (auto& message : diagnostics) {
                 message->printTo(stream);
             }
             diagnostics.clear();
+        }
+
+        Token next() {
+            while (true) {
+                size_t offsetBeforeTrying = offset;
+                discardLeadingWhitespace();
+
+                auto token = tryParseKeywordOrIdentifier();
+                if (token) {
+                    return token.value();
+                }
+
+                token = tryParsePunctuationOrComment();
+                if (token) {
+                    return token.value();
+                }
+
+                token = tryParseNumericLiteral();
+                if (token) {
+                    return token.value();
+                }
+
+                token = tryParseStringLiteral();
+                if (token) {
+                    return token.value();
+                }
+
+                if (currentCharacter() == EOF) {
+                    return EndOfFile{currentSpan().extendBack(1)};
+                }
+
+                if (offsetBeforeTrying == offset) {
+                    logMessage<UnrecognizedTokenError>(
+                        currentSpan().extendBack(1),
+                        static_cast<char>(getNextCharacter())
+                    );
+                }
+            }
         }
 
       private:
@@ -377,44 +405,6 @@ template <String... punctuations> struct WithPunctuations {
                 } else {
                     logMessage<UnknownEscapeSequence>(
                         currentSpan().extendBack(2), escapee
-                    );
-                }
-            }
-        }
-
-        Token parseNextToken() {
-            while (true) {
-                size_t offsetBeforeTrying = offset;
-                discardLeadingWhitespace();
-
-                auto token = tryParseKeywordOrIdentifier();
-                if (token) {
-                    return token.value();
-                }
-
-                token = tryParsePunctuationOrComment();
-                if (token) {
-                    return token.value();
-                }
-
-                token = tryParseNumericLiteral();
-                if (token) {
-                    return token.value();
-                }
-
-                token = tryParseStringLiteral();
-                if (token) {
-                    return token.value();
-                }
-
-                if (currentCharacter() == EOF) {
-                    return EndOfFile{currentSpan().extendBack(1)};
-                }
-
-                if (offsetBeforeTrying == offset) {
-                    logMessage<UnrecognizedTokenError>(
-                        currentSpan().extendBack(1),
-                        static_cast<char>(getNextCharacter())
                     );
                 }
             }
