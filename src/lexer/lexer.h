@@ -14,42 +14,49 @@
 namespace lexer {
 
 struct Identifier : std::string {
+    Span span;
     bool operator==(Identifier const&) const = default;
 };
 
 template <String name> struct Keyword {
+    Span span;
     bool operator==(Keyword const&) const = default;
 };
 
 template <String punctuation> struct Punctuation {
+    Span span;
     bool operator==(Punctuation const&) const = default;
 };
 
 namespace literal {
 struct Numeric {
     size_t value;
+    Span span;
+
     bool operator==(Numeric const&) const = default;
 };
 struct String : std::string {
-    String(std::string&& value) : std::string{value} {}
+    Span span;
+
+    String(std::string&& value, Span _span)
+        : std::string{std::move(value)}, span(_span) {}
     bool operator==(String const&) const = default;
 };
 }; // namespace literal
 
 struct EndOfFile {
+    Span span;
     bool operator==(EndOfFile const&) const = default;
 };
 
-template <class T> struct FoldOptional : std::optional<T> {
-    FoldOptional<T> operator||(auto&& tryNext) {
-        if (*this) {
-            return *this;
-        }
-        return tryNext();
+template <class T>
+std::optional<T>
+operator||(std::optional<T>&& current, std::invocable auto&& tryNext) {
+    if (current) {
+        return current;
     }
-};
-
-template <class T> FoldOptional(std::optional<T>&&) -> FoldOptional<T>;
+    return tryNext();
+}
 
 constexpr auto escapeSequences = [] {
     std::array<std::optional<char>, 256> escapes{};
@@ -69,7 +76,7 @@ class UnknownPunctuationError : public logs::SpannedMessage {
 
   public:
     UnknownPunctuationError(
-        Span _span, Source _source, std::string&& _punctuation
+        Source _source, Span _span, std::string&& _punctuation
     )
         : logs::SpannedMessage{_span, _source}, punctuation(_punctuation) {}
 
@@ -80,7 +87,7 @@ class UnrecognizedTokenError : public logs::SpannedMessage {
     char character;
 
   public:
-    UnrecognizedTokenError(Span _span, Source _source, char _character)
+    UnrecognizedTokenError(Source _source, Span _span, char _character)
         : logs::SpannedMessage{_span, _source}, character(_character) {}
 
     void printHeaderTo(std::ostream&) const override;
@@ -90,7 +97,7 @@ class UnknownEscapeSequence : public logs::SpannedMessage {
     char character;
 
   public:
-    UnknownEscapeSequence(Span _span, Source _source, char _character)
+    UnknownEscapeSequence(Source _source, Span _span, char _character)
         : logs::SpannedMessage{_span, _source}, character(_character) {}
 
     void printHeaderTo(std::ostream&) const override;
@@ -98,7 +105,14 @@ class UnknownEscapeSequence : public logs::SpannedMessage {
 
 class NumericLiteralTooLarge : public logs::SpannedMessage {
   public:
-    NumericLiteralTooLarge(Span _span, Source _source)
+    NumericLiteralTooLarge(Source _source, Span _span)
+        : logs::SpannedMessage{_span, _source} {}
+
+    void printHeaderTo(std::ostream&) const override;
+};
+
+struct NonTerminatedStringLiteral : public logs::SpannedMessage {
+    NonTerminatedStringLiteral(Source _source, Span _span)
         : logs::SpannedMessage{_span, _source} {}
 
     void printHeaderTo(std::ostream&) const override;
@@ -138,23 +152,30 @@ template <String... punctuations> struct WithPunctuations {
         size_t line = 0;
         std::vector<std::unique_ptr<logs::Message>> diagnostics{};
 
-        Span currentSpan() {
+        Span currentSpan() const {
             return Span{line, line, offset - column, column, column};
         }
 
-        template <class M> void logMessage(M&& message) {
-            diagnostics.push_back(std::make_unique<M>(std::move(message)));
+        template <typename M, typename... Args>
+            requires std::derived_from<M, logs::Message>
+        void logMessage(Args&&... args) {
+            diagnostics.push_back(
+                std::make_unique<M>(source, std::forward<Args>(args)...)
+            );
         }
 
-        int nextCharacter() {
+        int getNextCharacter() {
             int nextCharacter = source.stream.get();
-            ++offset;
 
-            if (nextCharacter == '\n') {
-                column = 0;
-                ++line;
-            } else {
-                ++column;
+            if (nextCharacter != EOF) {
+                ++offset;
+
+                if (nextCharacter == '\n') {
+                    column = 0;
+                    ++line;
+                } else {
+                    ++column;
+                }
             }
 
             return nextCharacter;
@@ -164,22 +185,25 @@ template <String... punctuations> struct WithPunctuations {
             return source.stream.peek();
         }
 
+        template <String prefix, String punctuation>
+        std::optional<Token> tryRemainingPunctuations() {
+            if (punctuation.length() > prefix.length() &&
+                currentCharacter() == punctuation[prefix.length()]) {
+                getNextCharacter();
+
+                static constexpr auto longerPrefix =
+                    truncate<prefix.length() + 1>(punctuation);
+                return tryParsePunctuationWithPrefix<longerPrefix>();
+            }
+            return std::optional<Token>{};
+        }
+
         template <String prefix>
         std::optional<Token> tryParsePunctuationWithPrefix()
             requires((punctuations.startsWith(prefix) || ...))
         {
-            auto token = (FoldOptional<Token>{} || ... || [this] {
-                if (punctuations.length() > prefix.length() &&
-                    currentCharacter() == punctuations[prefix.length()]) {
-                    nextCharacter();
-
-                    static constexpr auto longerPrefix =
-                        truncate<prefix.length() + 1>(punctuations);
-                    return FoldOptional{
-                        tryParsePunctuationWithPrefix<longerPrefix>(),
-                    };
-                }
-                return FoldOptional<Token>{};
+            auto token = (std::optional<Token>{} || ... || [this] {
+                return tryRemainingPunctuations<prefix, punctuations>();
             });
 
             if (token) {
@@ -187,17 +211,17 @@ template <String... punctuations> struct WithPunctuations {
             }
 
             if constexpr (((punctuations == prefix) || ...)) {
-                return Punctuation<prefix>{};
+                return Punctuation<prefix>{
+                    currentSpan().extendBack(prefix.length())};
             }
 
             auto unknownPuncutation = std::string{prefix.characters} +
-                                      static_cast<char>(nextCharacter());
+                                      static_cast<char>(getNextCharacter());
 
-            logMessage(UnknownPunctuationError{
+            logMessage<UnknownPunctuationError>(
                 currentSpan().extendBack(prefix.length() + 1),
-                source,
-                std::move(unknownPuncutation),
-            });
+                std::move(unknownPuncutation)
+            );
 
             return {};
         }
@@ -214,7 +238,7 @@ template <String... punctuations> struct WithPunctuations {
             }
 
             if (currentCharacter() == '/') {
-                nextCharacter();
+                getNextCharacter();
                 if (currentCharacter() == '/') {
                     discardComment();
                     return {};
@@ -226,28 +250,31 @@ template <String... punctuations> struct WithPunctuations {
         }
 
         void discardComment() {
-            while (nextCharacter() != '\n') {}
+            char nextCharacter = getNextCharacter();
+            while (nextCharacter != '\n' && nextCharacter != EOF) {
+                nextCharacter = getNextCharacter();
+            }
         }
 
         void discardNumericLiteralTail() {
             while (std::isdigit(currentCharacter())) {
-                nextCharacter();
+                getNextCharacter();
             }
         }
 
         void discardLeadingWhitespace() {
             while (std::isspace(currentCharacter())) {
-                nextCharacter();
+                getNextCharacter();
             }
         }
 
         std::string getNextWord() {
             std::string word{};
             while (std::isalnum(currentCharacter())) {
-                word.push_back(nextCharacter());
+                word.push_back(getNextCharacter());
             }
 
-            return std::move(word);
+            return word;
         }
 
         std::optional<Token> tryParseKeywordOrIdentifier() {
@@ -256,17 +283,18 @@ template <String... punctuations> struct WithPunctuations {
             }
 
             auto word = getNextWord();
-            auto keyword = (FoldOptional<Token>{} || ... || [&] {
+            auto keyword = (std::optional<Token>{} || ... || [&] {
                 if (keywords == word) {
-                    return FoldOptional<Token>{Keyword<keywords>{}};
+                    return std::optional<Token>{Keyword<keywords>{
+                        currentSpan().extendBack(keywords.length())}};
                 }
-                return FoldOptional<Token>{};
+                return std::optional<Token>{};
             });
 
             if (keyword) {
                 return keyword;
             }
-            return Identifier{word};
+            return Identifier{word, currentSpan().extendBack(word.length())};
         }
 
         bool checkedAdd(size_t& first, size_t second) {
@@ -294,18 +322,16 @@ template <String... punctuations> struct WithPunctuations {
             size_t value = 0;
 
             do {
-                size_t digit = static_cast<size_t>(nextCharacter()) - 48;
+                size_t digit = static_cast<size_t>(getNextCharacter()) - '0';
                 if (!checkedTimesTen(value) || !checkedAdd(value, digit)) {
                     discardNumericLiteralTail();
-                    logMessage(NumericLiteralTooLarge{
-                        beginSpan.to(currentSpan()),
-                        source,
-                    });
+                    logMessage<NumericLiteralTooLarge>(beginSpan.to(currentSpan(
+                    )));
                     break;
                 }
             } while (std::isdigit(currentCharacter()));
 
-            return literal::Numeric{value};
+            return literal::Numeric{value, beginSpan.to(currentSpan())};
         }
 
         std::optional<Token> tryParseStringLiteral() {
@@ -313,28 +339,47 @@ template <String... punctuations> struct WithPunctuations {
                 return {};
             }
 
-            nextCharacter();
+            auto beginSpan = currentSpan();
+
+            getNextCharacter();
             std::string literal{};
 
             while (currentCharacter() != '"') {
-                char character = nextCharacter();
-                if (character == '\\') {
-                    char escapee = nextCharacter();
-                    auto resolved = escapeSequences[escapee];
-                    if (resolved) {
-                        literal.push_back(resolved.value());
-                    } else {
-                        logMessage(UnknownEscapeSequence{
-                            currentSpan().extendBack(2), Source{source},
-                            escapee});
-                    }
+                char character = getNextCharacter();
+
+                if (character == EOF) {
+                    logMessage<NonTerminatedStringLiteral>(
+                        currentSpan().extendBack(1)
+                    );
+                    return {};
+                } else if (character == '\\') {
+                    escapeNextCharacter(literal);
                 } else {
                     literal.push_back(character);
                 }
             };
-            nextCharacter();
+            getNextCharacter();
 
-            return literal::String{std::move(literal)};
+            return literal::String{
+                std::move(literal), beginSpan.to(currentSpan())};
+        }
+
+        void escapeNextCharacter(std::string& literal) {
+            int escapee = getNextCharacter();
+            if (escapee == EOF) {
+                logMessage<UnknownEscapeSequence>(
+                    currentSpan().extendBack(1), ' '
+                );
+            } else {
+                auto resolved = escapeSequences[escapee];
+                if (resolved) {
+                    literal.push_back(resolved.value());
+                } else {
+                    logMessage<UnknownEscapeSequence>(
+                        currentSpan().extendBack(2), escapee
+                    );
+                }
+            }
         }
 
         Token parseNextToken() {
@@ -363,15 +408,14 @@ template <String... punctuations> struct WithPunctuations {
                 }
 
                 if (currentCharacter() == EOF) {
-                    return EndOfFile{};
+                    return EndOfFile{currentSpan().extendBack(1)};
                 }
 
                 if (offsetBeforeTrying == offset) {
-                    logMessage(UnrecognizedTokenError{
+                    logMessage<UnrecognizedTokenError>(
                         currentSpan().extendBack(1),
-                        source,
-                        static_cast<char>(nextCharacter()),
-                    });
+                        static_cast<char>(getNextCharacter())
+                    );
                 }
             }
         }

@@ -22,6 +22,10 @@ std::ostream& operator<<(std::ostream& stream, Red redText) {
     return stream << setRedColor << redText.text << resetColor;
 }
 
+std::ostream& operator<<(std::ostream& stream, Span const& span) {
+    return stream << span.firstLine << ' ' << span.lastLine << ' '<< span.beginHighlightOffset << ' '<< span.endHighlightOffset<< ' ' << span.beginOffset;
+}
+
 size_t numberOfDigits(size_t number) {
     return number > 1 ? std::log10(number) + 1 : 1;
 }

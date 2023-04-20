@@ -11,11 +11,25 @@ TEST(LexerTest, Keywords) {
         "file.icy",
     }};
 
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Punctuation<",">{}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Keyword<"fun">{}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Identifier{"word"}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Keyword<"if">{}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Identifier{"other"}});
+    EXPECT_EQ(
+        lexer.next(),
+        Lexer::Token{lexer::Punctuation<",">{(Span{0, 0, 0, 0, 1})}}
+    );
+    EXPECT_EQ(
+        lexer.next(), Lexer::Token{lexer::Keyword<"fun">{(Span{0, 0, 0, 2, 5})}}
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        Lexer::Token{(lexer::Identifier{"word", (Span{0, 0, 0, 6, 10})})}
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        Lexer::Token{lexer::Keyword<"if">{(Span{0, 0, 0, 11, 13})}}
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        Lexer::Token{(lexer::Identifier{"other", Span{0, 0, 0, 14, 19}})}
+    );
 }
 
 TEST(LexerTest, StringLiteral) {
@@ -26,11 +40,18 @@ TEST(LexerTest, StringLiteral) {
         "file.icy",
     }};
 
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Punctuation<",">{}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Identifier{"word"}});
     EXPECT_EQ(
         lexer.next(),
-        Lexer::Token{lexer::literal::String{std::string{"a string literal"}}}
+        Lexer::Token{lexer::Punctuation<",">{(Span{0, 0, 0, 0, 1})}}
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Identifier{"word", Span{0, 0, 0, 2, 6}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::literal::String{
+            std::string{"a string literal"}, Span{0, 0, 0, 7, 25}}})
     );
 }
 
@@ -44,7 +65,8 @@ TEST(LexerTest, EscapeSequences) {
 
     EXPECT_EQ(
         lexer.next(),
-        Lexer::Token{lexer::literal::String{std::string{"string\bs\t\n\\"}}}
+        (Lexer::Token{lexer::literal::String{
+            std::string{"string\bs\t\n\\"}, Span{0, 0, 0, 0, 17}}})
     );
 }
 
@@ -56,10 +78,22 @@ TEST(LexerTest, NumericLiterals) {
         "file.icy",
     }};
 
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::literal::Numeric{10}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::literal::Numeric{34}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Identifier{"word"}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::literal::Numeric{7}});
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::literal::Numeric{10, Span{0, 0, 0, 0, 2}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::literal::Numeric{34, Span{0, 0, 0, 3, 5}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Identifier{"word", Span{0, 0, 0, 6, 10}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::literal::Numeric{7, Span{0, 0, 0, 11, 12}}})
+    );
 }
 
 TEST(LexerTest, PunctuationFactoring) {
@@ -70,12 +104,30 @@ TEST(LexerTest, PunctuationFactoring) {
         "file.icy",
     }};
 
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::literal::Numeric{10}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Punctuation<"==">{}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Punctuation<"===">{}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Punctuation<"=">{}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Punctuation<"==">{}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Keyword<"fun">{}});
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::literal::Numeric{10, Span{0, 0, 0, 0, 2}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Punctuation<"==">{Span{0, 0, 0, 3, 5}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Punctuation<"===">{Span{0, 0, 0, 6, 9}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Punctuation<"=">{Span{0, 0, 0, 10, 11}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Punctuation<"==">{Span{0, 0, 0, 12, 14}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Keyword<"fun">{Span{0, 0, 0, 15, 18}}})
+    );
 }
 
 TEST(LexerTest, Comment) {
@@ -86,10 +138,22 @@ TEST(LexerTest, Comment) {
         "file.icy",
     }};
 
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Identifier{"source"}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Identifier{"code"}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Keyword<"fun">{}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Identifier{"code"}});
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Identifier{"source", (Span{0, 0, 0, 0, 6})}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Identifier{"code", (Span{0, 0, 0, 7, 11})}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Keyword<"fun">{(Span{1, 1, 27, 0, 3})}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Identifier{"code", (Span{1, 1, 27, 4, 8})}})
+    );
 }
 
 TEST(LexerTest, UnknownPunctuation) {
@@ -100,10 +164,22 @@ TEST(LexerTest, UnknownPunctuation) {
         "file.icy",
     }};
 
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Punctuation<",">{}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Identifier{"hmm"}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Identifier{"ident"}});
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Identifier{"word"}});
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Punctuation<",">{Span{0, 0, 0, 0, 1}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Identifier{"hmm", Span{0, 0, 0, 2, 5}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Identifier{"ident", Span{0, 0, 0, 8, 13}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Identifier{"word", Span{0, 0, 0, 14, 18}}})
+    );
 
     std::stringstream errors{};
     lexer.printDiagnosticsTo(errors);
@@ -129,8 +205,8 @@ TEST(LexerTest, UnrecognizedEscapeSequence) {
     }};
 
     EXPECT_EQ(
-        lexer.next(),
-        Lexer::Token{lexer::literal::String{std::string{"blah stuff"}}}
+        lexer.next(), (Lexer::Token{lexer::literal::String{
+                          std::string{"blah stuff"}, Span{0, 0, 0, 0, 14}}})
     );
 
     std::stringstream errors{};
@@ -156,11 +232,18 @@ TEST(LexerTest, NumericLiteralTooLarge) {
         "file.icy",
     }};
 
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Keyword<"fun">{}});
     EXPECT_EQ(
-        lexer.next(), Lexer::Token{lexer::literal::Numeric{1912398234712327428}}
+        lexer.next(),
+        (Lexer::Token{lexer::Keyword<"fun">{(Span{0, 0, 0, 0, 3})}})
     );
-    EXPECT_EQ(lexer.next(), Lexer::Token{lexer::Identifier{"word"}});
+    EXPECT_EQ(
+        lexer.next(), (Lexer::Token{lexer::literal::Numeric{
+                          1912398234712327428, (Span{0, 0, 0, 4, 37})}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Identifier{"word", (Span{0, 0, 0, 38, 42})}})
+    );
 
     std::stringstream errors{};
     lexer.printDiagnosticsTo(errors);
@@ -178,4 +261,41 @@ TEST(LexerTest, NumericLiteralTooLarge) {
                    << " @ file.icy:1:5" << std::endl;
 
     EXPECT_EQ(errors.str(), expectedErrors.str());
+}
+
+TEST(LexerTest, NonTerminatedComment) {
+    using Lexer = lexer::WithPunctuations<".", ",">::Lexer<>;
+    std::stringstream source{"// non terminated comment"};
+    Lexer lexer{Source{source, ""}};
+    EXPECT_EQ(
+        lexer.next(), (Lexer::Token{lexer::EndOfFile{Span{0, 0, 0, 24, 25}}})
+    );
+}
+
+TEST(LexerTest, NonTerminatedString) {
+    using Lexer = lexer::WithPunctuations<".", ",">::Lexer<>;
+    std::stringstream source{R"("a string literal)"};
+    Lexer lexer{Source{source, ""}};
+    EXPECT_NE(
+        lexer.next(),
+        (Lexer::Token{lexer::literal::String{
+            std::string{"a string literal"}, Span{0, 0, 0, 0, 17}}})
+    );
+    std::stringstream errors{};
+    lexer.printDiagnosticsTo(errors);
+    EXPECT_FALSE(errors.str().empty());
+}
+
+TEST(LexerTest, NonTerminatedEscape) {
+    using Lexer = lexer::WithPunctuations<".", ",">::Lexer<>;
+    std::stringstream source{R"("a string literal\)"};
+    Lexer lexer{Source{source, ""}};
+    EXPECT_NE(
+        lexer.next(),
+        (Lexer::Token{lexer::literal::String{
+            std::string{R"(a string literal\)"}, Span{0, 0, 0, 0, 18}}})
+    );
+    std::stringstream errors{};
+    lexer.printDiagnosticsTo(errors);
+    EXPECT_FALSE(errors.str().empty());
 }

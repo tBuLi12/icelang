@@ -19,4 +19,10 @@ void NumericLiteralTooLarge::printHeaderTo(std::ostream& stream) const {
            << "cannot exceed " << std::numeric_limits<size_t>::max()
            << std::endl;
 }
+
+void NonTerminatedStringLiteral::printHeaderTo(std::ostream& stream) const {
+    stream << Red{"non-terminated string literal"} << ": expected \""
+           << "cannot exceed " << std::numeric_limits<size_t>::max()
+           << std::endl;
+}
 } // namespace lexer

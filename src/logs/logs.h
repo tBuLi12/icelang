@@ -15,7 +15,10 @@ struct Span {
 
     Span to(Span other);
     Span extendBack(size_t offset);
+    bool operator==(Span const&) const = default;
 };
+
+std::ostream& operator<<(std::ostream& stream, Span const& span);
 
 struct Source {
     std::istream& stream;
