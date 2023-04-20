@@ -5,6 +5,7 @@
 #include "../string/string.h"
 #include <array>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <ranges>

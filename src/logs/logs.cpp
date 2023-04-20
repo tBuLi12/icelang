@@ -1,5 +1,7 @@
 #include "logs.h"
 
+#include <cmath>
+
 Span Span::to(Span other) {
     return Span{
         firstLine,
@@ -23,7 +25,9 @@ std::ostream& operator<<(std::ostream& stream, Red redText) {
 }
 
 std::ostream& operator<<(std::ostream& stream, Span const& span) {
-    return stream << span.firstLine << ' ' << span.lastLine << ' '<< span.beginHighlightOffset << ' '<< span.endHighlightOffset<< ' ' << span.beginOffset;
+    return stream << span.firstLine << ' ' << span.lastLine << ' '
+                  << span.beginHighlightOffset << ' ' << span.endHighlightOffset
+                  << ' ' << span.beginOffset;
 }
 
 size_t numberOfDigits(size_t number) {
