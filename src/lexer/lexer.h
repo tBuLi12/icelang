@@ -58,18 +58,16 @@ operator||(std::optional<T>&& current, std::invocable auto&& tryNext) {
     return tryNext();
 }
 
-constexpr auto escapeSequences = [] {
-    std::array<std::optional<char>, 256> escapes{};
-    escapes['t'] = '\t';
-    escapes['\''] = '\'';
-    escapes['"'] = '\"';
-    escapes['\\'] = '\\';
-    escapes['b'] = '\b';
-    escapes['r'] = '\r';
-    escapes['n'] = '\n';
-    escapes['0'] = '\0';
-    return escapes;
-}();
+constexpr std::array<std::pair<char, char>, 8> escapeSequences{{
+    {'t', '\t'},
+    {'\'', '\''},
+    {'"', '"'},
+    {'\\', '\\'},
+    {'b', '\b'},
+    {'r', '\r'},
+    {'n', '\n'},
+    {'0', '\0'},
+}};
 
 class UnknownPunctuationError : public logs::SpannedMessage {
     std::string punctuation;
@@ -371,9 +369,11 @@ template <String... punctuations> struct WithPunctuations {
                     currentSpan().extendBack(1), ' '
                 );
             } else {
-                auto resolved = escapeSequences[escapee];
-                if (resolved) {
-                    literal.push_back(resolved.value());
+                auto resolved = std::ranges::find(
+                    escapeSequences, escapee, &std::pair<char, char>::first
+                );
+                if (resolved != escapeSequences.end()) {
+                    literal.push_back(resolved->second);
                 } else {
                     logMessage<UnknownEscapeSequence>(
                         currentSpan().extendBack(2), escapee
