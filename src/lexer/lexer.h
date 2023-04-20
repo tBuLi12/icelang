@@ -186,7 +186,7 @@ template <String... punctuations> struct WithPunctuations {
         }
 
         template <String prefix, String punctuation>
-        std::optional<Token> tryRemainingPunctuations() {
+        std::optional<Token> tryParseSinglePunctuation() {
             if (punctuation.length() > prefix.length() &&
                 currentCharacter() == punctuation[prefix.length()]) {
                 getNextCharacter();
@@ -203,7 +203,7 @@ template <String... punctuations> struct WithPunctuations {
             requires((punctuations.startsWith(prefix) || ...))
         {
             auto token = (std::optional<Token>{} || ... || [this] {
-                return tryRemainingPunctuations<prefix, punctuations>();
+                return tryParseSinglePunctuation<prefix, punctuations>();
             });
 
             if (token) {
