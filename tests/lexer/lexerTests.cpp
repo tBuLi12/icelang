@@ -80,11 +80,11 @@ TEST(LexerTest, NumericLiterals) {
 
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::Numeric{10, Span{0, 0, 0, 0, 2}}})
+        (Lexer::Token{lexer::literal::Integer{10, Span{0, 0, 0, 0, 2}}})
     );
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::Numeric{34, Span{0, 0, 0, 3, 5}}})
+        (Lexer::Token{lexer::literal::Integer{34, Span{0, 0, 0, 3, 5}}})
     );
     EXPECT_EQ(
         lexer.next(),
@@ -92,7 +92,7 @@ TEST(LexerTest, NumericLiterals) {
     );
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::Numeric{7, Span{0, 0, 0, 11, 12}}})
+        (Lexer::Token{lexer::literal::Integer{7, Span{0, 0, 0, 11, 12}}})
     );
 }
 
@@ -106,7 +106,7 @@ TEST(LexerTest, PunctuationFactoring) {
 
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::Numeric{10, Span{0, 0, 0, 0, 2}}})
+        (Lexer::Token{lexer::literal::Integer{10, Span{0, 0, 0, 0, 2}}})
     );
     EXPECT_EQ(
         lexer.next(),
@@ -237,7 +237,7 @@ TEST(LexerTest, NumericLiteralTooLarge) {
         (Lexer::Token{lexer::Keyword<"fun">{(Span{0, 0, 0, 0, 3})}})
     );
     EXPECT_EQ(
-        lexer.next(), (Lexer::Token{lexer::literal::Numeric{
+        lexer.next(), (Lexer::Token{lexer::literal::Integer{
                           1912398234712327428, (Span{0, 0, 0, 4, 37})}})
     );
     EXPECT_EQ(
@@ -298,4 +298,59 @@ TEST(LexerTest, NonTerminatedEscape) {
     std::stringstream errors{};
     lexer.printDiagnosticsTo(errors);
     EXPECT_FALSE(errors.str().empty());
+}
+
+TEST(LexerTest, FloatLiteral) {
+    using Lexer = lexer::WithPunctuations<".", ",">::Lexer<>;
+    std::stringstream source{"34.00452"};
+    Lexer lexer{Source{source, ""}};
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::literal::Floating{34.00452, Span{0, 0, 0, 0, 8}}})
+    );
+    std::stringstream errors{};
+    lexer.printDiagnosticsTo(errors);
+    EXPECT_TRUE(errors.str().empty());
+}
+
+TEST(LexerTest, FloatLiteralWithoutDecimal) {
+    using Lexer = lexer::WithPunctuations<".", ",">::Lexer<>;
+    std::stringstream source{"21."};
+    Lexer lexer{Source{source, ""}};
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::literal::Floating{21.0, Span{0, 0, 0, 0, 3}}})
+    );
+    std::stringstream errors{};
+    lexer.printDiagnosticsTo(errors);
+    EXPECT_TRUE(errors.str().empty());
+}
+
+TEST(LexerTest, TupleAccessRecognition) {
+    using Lexer = lexer::WithPunctuations<".", ",">::Lexer<>;
+    std::stringstream source{"tuple.0.1"};
+    Lexer lexer{Source{source, ""}};
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Identifier{"tuple", Span{0, 0, 0, 0, 5}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Punctuation<".">{Span{0, 0, 0, 5, 6}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::literal::Integer{0, Span{0, 0, 0, 6, 7}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Punctuation<".">{Span{0, 0, 0, 7, 8}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::literal::Integer{1, Span{0, 0, 0, 8, 9}}})
+    );
+    std::stringstream errors{};
+    lexer.printDiagnosticsTo(errors);
+    EXPECT_TRUE(errors.str().empty());
 }

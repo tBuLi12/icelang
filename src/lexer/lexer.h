@@ -30,11 +30,17 @@ template <String punctuation> struct Punctuation {
 };
 
 namespace literal {
-struct Numeric {
+struct Integer {
     size_t value;
     Span span;
 
-    bool operator==(Numeric const&) const = default;
+    bool operator==(Integer const&) const = default;
+};
+struct Floating {
+    double value;
+    Span span;
+
+    bool operator==(Floating const&) const = default;
 };
 struct String : std::string {
     Span span;
@@ -122,7 +128,8 @@ template <String... punctuations> struct WithPunctuations {
       public:
         using Token = std::variant<
             Keyword<keywords>..., Punctuation<punctuations>...,
-            literal::Numeric, literal::String, Identifier, EndOfFile>;
+            literal::Integer, literal::Floating, literal::String, Identifier,
+            EndOfFile>;
 
         Lexer(Source _source) : source(_source) {}
 
@@ -134,6 +141,22 @@ template <String... punctuations> struct WithPunctuations {
         }
 
         Token next() {
+            auto nextToken = getNextToken();
+            lastTokenWasDot =
+                std::holds_alternative<Punctuation<".">>(nextToken);
+            return nextToken;
+        }
+
+      private:
+        Token currentToken;
+        Source source;
+        size_t offset = 0;
+        size_t column = 0;
+        size_t line = 0;
+        std::vector<std::unique_ptr<logs::Message>> diagnostics{};
+        bool lastTokenWasDot = false;
+
+        Token getNextToken() {
             while (true) {
                 size_t offsetBeforeTrying = offset;
                 discardLeadingWhitespace();
@@ -170,14 +193,6 @@ template <String... punctuations> struct WithPunctuations {
                 }
             }
         }
-
-      private:
-        Token currentToken;
-        Source source;
-        size_t offset = 0;
-        size_t column = 0;
-        size_t line = 0;
-        std::vector<std::unique_ptr<logs::Message>> diagnostics{};
 
         Span currentSpan() const {
             return Span{line, line, offset - column, column, column};
@@ -338,6 +353,16 @@ template <String... punctuations> struct WithPunctuations {
             return true;
         }
 
+        bool tryGetNextDigitOf(size_t& number) {
+            size_t digit = static_cast<size_t>(getNextCharacter()) - '0';
+
+            if (!tryPushDigit(number, digit)) {
+                discardNumericLiteralTail();
+                return false;
+            }
+            return true;
+        }
+
         std::optional<Token> tryParseNumericLiteral() {
             if (!std::isdigit(currentCharacter())) {
                 return {};
@@ -347,16 +372,32 @@ template <String... punctuations> struct WithPunctuations {
             size_t value = 0;
 
             do {
-                size_t digit = static_cast<size_t>(getNextCharacter()) - '0';
-                if (!tryPushDigit(value, digit)) {
-                    discardNumericLiteralTail();
+                if (!tryGetNextDigitOf(value)) {
                     logMessage<NumericLiteralTooLarge>(beginSpan.to(currentSpan(
                     )));
-                    break;
                 }
             } while (std::isdigit(currentCharacter()));
 
-            return literal::Numeric{value, beginSpan.to(currentSpan())};
+            if (lastTokenWasDot || currentCharacter() != '.') {
+                return literal::Integer{value, beginSpan.to(currentSpan())};
+            }
+
+            getNextCharacter();
+            double divisor = 1;
+            size_t fractionalValue = 0;
+            while (std::isdigit(currentCharacter())) {
+                divisor *= 10;
+                if (!tryGetNextDigitOf(fractionalValue)) {
+                    logMessage<NumericLiteralTooLarge>(beginSpan.to(currentSpan(
+                    )));
+                }
+            }
+
+            return literal::Floating{
+                static_cast<double>(value) +
+                    static_cast<double>(fractionalValue) / divisor,
+                beginSpan.to(currentSpan()),
+            };
         }
 
         std::optional<Token> tryParseStringLiteral() {
