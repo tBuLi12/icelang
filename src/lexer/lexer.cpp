@@ -1,7 +1,9 @@
+#include <fmt/core.h>
 #include "lexer.h"
 
 namespace lexer {
 void UnknownPunctuationError::printHeaderTo(std::ostream& stream) const {
+
     stream << Red{"unknown punctuation"} << ": " << punctuation << std::endl;
 }
 
