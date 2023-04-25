@@ -11,10 +11,12 @@
 #include <ranges>
 #include <string>
 #include <variant>
+#include <format>
 
 namespace lexer {
 
-struct Identifier : std::string {
+struct Identifier {
+    std::string value;
     Span span;
     bool operator==(Identifier const&) const = default;
 };
@@ -29,27 +31,24 @@ template <String punctuation> struct Punctuation {
     bool operator==(Punctuation const&) const = default;
 };
 
-namespace literal {
-struct Integer {
+struct IntegerLiteral {
     size_t value;
     Span span;
 
-    bool operator==(Integer const&) const = default;
+    bool operator==(IntegerLiteral const&) const = default;
 };
-struct Floating {
+struct FloatLiteral {
     double value;
     Span span;
 
-    bool operator==(Floating const&) const = default;
+    bool operator==(FloatLiteral const&) const = default;
 };
-struct String : std::string {
+struct StringLiteral {
+    std::string value;
     Span span;
 
-    String(std::string&& value, Span _span)
-        : std::string{std::move(value)}, span(_span) {}
-    bool operator==(String const&) const = default;
+    bool operator==(StringLiteral const&) const = default;
 };
-}; // namespace literal
 
 struct EndOfFile {
     Span span;
@@ -76,66 +75,19 @@ constexpr std::array<std::pair<char, char>, 8> escapeSequences{{
     {'0', '\0'},
 }};
 
-class UnknownPunctuationError : public logs::SpannedMessage {
-    std::string punctuation;
-
-  public:
-    UnknownPunctuationError(
-        Source _source, Span _span, std::string&& _punctuation
-    )
-        : logs::SpannedMessage{_span, _source}, punctuation(_punctuation) {}
-
-    void printHeaderTo(std::ostream&) const override;
-};
-
-class UnrecognizedTokenError : public logs::SpannedMessage {
-    char character;
-
-  public:
-    UnrecognizedTokenError(Source _source, Span _span, char _character)
-        : logs::SpannedMessage{_span, _source}, character(_character) {}
-
-    void printHeaderTo(std::ostream&) const override;
-};
-
-class UnknownEscapeSequence : public logs::SpannedMessage {
-    char character;
-
-  public:
-    UnknownEscapeSequence(Source _source, Span _span, char _character)
-        : logs::SpannedMessage{_span, _source}, character(_character) {}
-
-    void printHeaderTo(std::ostream&) const override;
-};
-
-class NumericLiteralTooLarge : public logs::SpannedMessage {
-  public:
-    NumericLiteralTooLarge(Source _source, Span _span)
-        : logs::SpannedMessage{_span, _source} {}
-
-    void printHeaderTo(std::ostream&) const override;
-};
-
-struct NonTerminatedStringLiteral : public logs::SpannedMessage {
-    NonTerminatedStringLiteral(Source _source, Span _span)
-        : logs::SpannedMessage{_span, _source} {}
-
-    void printHeaderTo(std::ostream&) const override;
-};
-
 template <String... punctuations> struct WithPunctuations {
     template <String... keywords> class Lexer {
       public:
         using Token = std::variant<
             Keyword<keywords>..., Punctuation<punctuations>...,
-            literal::Integer, literal::Floating, literal::String, Identifier,
+            IntegerLiteral, FloatLiteral, StringLiteral, Identifier,
             EndOfFile>;
 
         Lexer(Source _source) : source(_source) {}
 
         void printDiagnosticsTo(std::ostream& stream) {
             for (auto& message : diagnostics) {
-                message->printTo(stream);
+                stream << message;
             }
             diagnostics.clear();
         }
@@ -147,17 +99,21 @@ template <String... punctuations> struct WithPunctuations {
             return nextToken;
         }
 
+        void resetInternalState() {
+            lastTokenWasDot = false;
+        }
+
       private:
         Token currentToken;
         Source source;
         size_t offset = 0;
         size_t column = 0;
         size_t line = 0;
-        std::vector<std::unique_ptr<logs::Message>> diagnostics{};
+        std::vector<logs::SpannedMessage> diagnostics{};
         bool lastTokenWasDot = false;
 
         Token getNextToken() {
-            while (true) {
+            while (currentCharacter() != EOF) {
                 size_t offsetBeforeTrying = offset;
                 discardLeadingWhitespace();
 
@@ -186,9 +142,10 @@ template <String... punctuations> struct WithPunctuations {
                 }
 
                 if (offsetBeforeTrying == offset) {
-                    logMessage<UnrecognizedTokenError>(
+                    logMessage(
                         currentSpan().extendBack(1),
-                        static_cast<char>(getNextCharacter())
+                        "unrecognized token",
+                        std::string{static_cast<char>(getNextCharacter())}
                     );
                 }
             }
@@ -198,12 +155,13 @@ template <String... punctuations> struct WithPunctuations {
             return Span{line, line, offset - column, column, column};
         }
 
-        template <typename M, typename... Args>
-            requires std::derived_from<M, logs::Message>
-        void logMessage(Args&&... args) {
-            diagnostics.push_back(
-                std::make_unique<M>(source, std::forward<Args>(args)...)
-            );
+        void logMessage(Span span, std::string_view type, std::string&& header) {
+            diagnostics.push_back(logs::SpannedMessage{
+                source,
+                span,
+                type,
+                std::move(header),
+            });
         }
 
         int getNextCharacter() {
@@ -260,8 +218,9 @@ template <String... punctuations> struct WithPunctuations {
             auto unknownPuncutation = std::string{prefix.characters} +
                                       static_cast<char>(getNextCharacter());
 
-            logMessage<UnknownPunctuationError>(
+            logMessage(
                 currentSpan().extendBack(prefix.length() + 1),
+                "unknown punctuation",
                 std::move(unknownPuncutation)
             );
 
@@ -336,7 +295,8 @@ template <String... punctuations> struct WithPunctuations {
             if (keyword) {
                 return keyword;
             }
-            return Identifier{word, currentSpan().extendBack(word.length())};
+            Span span = currentSpan().extendBack(word.length());
+            return Identifier{std::move(word), span};
         }
 
         static bool tryPushDigit(size_t& number, size_t digit) {
@@ -373,13 +333,16 @@ template <String... punctuations> struct WithPunctuations {
 
             do {
                 if (!tryGetNextDigitOf(value)) {
-                    logMessage<NumericLiteralTooLarge>(beginSpan.to(currentSpan(
-                    )));
+                    logMessage(
+                        beginSpan.to(currentSpan()),
+                        "numeric literal too large",
+                        std::format("cannot exceed {}", std::numeric_limits<size_t>::max())
+                    );
                 }
             } while (std::isdigit(currentCharacter()));
 
             if (lastTokenWasDot || currentCharacter() != '.') {
-                return literal::Integer{value, beginSpan.to(currentSpan())};
+                return IntegerLiteral{value, beginSpan.to(currentSpan())};
             }
 
             getNextCharacter();
@@ -388,12 +351,15 @@ template <String... punctuations> struct WithPunctuations {
             while (std::isdigit(currentCharacter())) {
                 divisor *= 10;
                 if (!tryGetNextDigitOf(fractionalValue)) {
-                    logMessage<NumericLiteralTooLarge>(beginSpan.to(currentSpan(
-                    )));
+                    logMessage(
+                        beginSpan.to(currentSpan()),
+                        "numeric literal too large",
+                        std::format("cannot exceed {}", std::numeric_limits<size_t>::max())
+                    );
                 }
             }
 
-            return literal::Floating{
+            return FloatLiteral{
                 static_cast<double>(value) +
                     static_cast<double>(fractionalValue) / divisor,
                 beginSpan.to(currentSpan()),
@@ -414,8 +380,10 @@ template <String... punctuations> struct WithPunctuations {
                 char character = getNextCharacter();
 
                 if (character == EOF) {
-                    logMessage<NonTerminatedStringLiteral>(
-                        currentSpan().extendBack(1)
+                    logMessage(
+                        currentSpan().extendBack(1),
+                        "non-terminated string literal",
+                        "expected \""
                     );
                     return {};
                 } else if (character == '\\') {
@@ -426,15 +394,17 @@ template <String... punctuations> struct WithPunctuations {
             };
             getNextCharacter();
 
-            return literal::String{
+            return StringLiteral{
                 std::move(literal), beginSpan.to(currentSpan())};
         }
 
         void escapeNextCharacter(std::string& literal) {
             int escapee = getNextCharacter();
             if (escapee == EOF) {
-                logMessage<UnknownEscapeSequence>(
-                    currentSpan().extendBack(1), ' '
+                logMessage(
+                    currentSpan().extendBack(1),
+                    "unknown escape sequence",
+                    "\\(EOF)"
                 );
             } else {
                 auto resolved = std::ranges::find(
@@ -443,8 +413,10 @@ template <String... punctuations> struct WithPunctuations {
                 if (resolved != escapeSequences.end()) {
                     literal.push_back(resolved->second);
                 } else {
-                    logMessage<UnknownEscapeSequence>(
-                        currentSpan().extendBack(2), escapee
+                    logMessage(
+                        currentSpan().extendBack(2),
+                        "unknown escape sequence",
+                        std::format("\\{}", static_cast<char>(escapee))
                     );
                 }
             }

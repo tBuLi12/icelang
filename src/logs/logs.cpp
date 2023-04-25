@@ -111,8 +111,9 @@ struct logs::SpannedMessage::Formatter {
 };
 
 namespace logs {
-void SpannedMessage::printTo(std::ostream& stream) const {
-    printHeaderTo(stream);
-    Formatter{stream, *this}.print();
+std::ostream& operator<<(std::ostream& stream, SpannedMessage const& message) {
+    stream << Red{message.type} << ": " << message.header << std::endl;
+    SpannedMessage::Formatter{stream, message}.print();
+    return stream;
 }
 } // namespace logs

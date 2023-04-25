@@ -30,7 +30,6 @@ include_directories(${PROJECT_SOURCE_DIR}/src/logs)
 add_executable(
   lexerTests
   ${PROJECT_SOURCE_DIR}/tests/lexer/lexerTests.cpp
-  ${PROJECT_SOURCE_DIR}/src/lexer/lexer.cpp
   ${PROJECT_SOURCE_DIR}/src/logs/logs.cpp
 )
 

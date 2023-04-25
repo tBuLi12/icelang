@@ -50,7 +50,7 @@ TEST(LexerTest, StringLiteral) {
     );
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::String{
+        (Lexer::Token{lexer::StringLiteral{
             std::string{"a string literal"}, Span{0, 0, 0, 7, 25}}})
     );
 }
@@ -65,7 +65,7 @@ TEST(LexerTest, EscapeSequences) {
 
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::String{
+        (Lexer::Token{lexer::StringLiteral{
             std::string{"string\bs\t\n\\"}, Span{0, 0, 0, 0, 17}}})
     );
 }
@@ -80,11 +80,11 @@ TEST(LexerTest, NumericLiterals) {
 
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::Integer{10, Span{0, 0, 0, 0, 2}}})
+        (Lexer::Token{lexer::IntegerLiteral{10, Span{0, 0, 0, 0, 2}}})
     );
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::Integer{34, Span{0, 0, 0, 3, 5}}})
+        (Lexer::Token{lexer::IntegerLiteral{34, Span{0, 0, 0, 3, 5}}})
     );
     EXPECT_EQ(
         lexer.next(),
@@ -92,7 +92,7 @@ TEST(LexerTest, NumericLiterals) {
     );
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::Integer{7, Span{0, 0, 0, 11, 12}}})
+        (Lexer::Token{lexer::IntegerLiteral{7, Span{0, 0, 0, 11, 12}}})
     );
 }
 
@@ -106,7 +106,7 @@ TEST(LexerTest, PunctuationFactoring) {
 
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::Integer{10, Span{0, 0, 0, 0, 2}}})
+        (Lexer::Token{lexer::IntegerLiteral{10, Span{0, 0, 0, 0, 2}}})
     );
     EXPECT_EQ(
         lexer.next(),
@@ -205,7 +205,7 @@ TEST(LexerTest, UnrecognizedEscapeSequence) {
     }};
 
     EXPECT_EQ(
-        lexer.next(), (Lexer::Token{lexer::literal::String{
+        lexer.next(), (Lexer::Token{lexer::StringLiteral{
                           std::string{"blah stuff"}, Span{0, 0, 0, 0, 14}}})
     );
 
@@ -237,7 +237,7 @@ TEST(LexerTest, NumericLiteralTooLarge) {
         (Lexer::Token{lexer::Keyword<"fun">{(Span{0, 0, 0, 0, 3})}})
     );
     EXPECT_EQ(
-        lexer.next(), (Lexer::Token{lexer::literal::Integer{
+        lexer.next(), (Lexer::Token{lexer::IntegerLiteral{
                           1912398234712327428, (Span{0, 0, 0, 4, 37})}})
     );
     EXPECT_EQ(
@@ -278,7 +278,7 @@ TEST(LexerTest, NonTerminatedString) {
     Lexer lexer{Source{source, ""}};
     EXPECT_NE(
         lexer.next(),
-        (Lexer::Token{lexer::literal::String{
+        (Lexer::Token{lexer::StringLiteral{
             std::string{"a string literal"}, Span{0, 0, 0, 0, 17}}})
     );
     std::stringstream errors{};
@@ -292,7 +292,7 @@ TEST(LexerTest, NonTerminatedEscape) {
     Lexer lexer{Source{source, ""}};
     EXPECT_NE(
         lexer.next(),
-        (Lexer::Token{lexer::literal::String{
+        (Lexer::Token{lexer::StringLiteral{
             std::string{R"(a string literal\)"}, Span{0, 0, 0, 0, 18}}})
     );
     std::stringstream errors{};
@@ -306,7 +306,7 @@ TEST(LexerTest, FloatLiteral) {
     Lexer lexer{Source{source, ""}};
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::Floating{34.00452, Span{0, 0, 0, 0, 8}}})
+        (Lexer::Token{lexer::FloatLiteral{34.00452, Span{0, 0, 0, 0, 8}}})
     );
     std::stringstream errors{};
     lexer.printDiagnosticsTo(errors);
@@ -319,7 +319,7 @@ TEST(LexerTest, FloatLiteralWithoutDecimal) {
     Lexer lexer{Source{source, ""}};
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::Floating{21.0, Span{0, 0, 0, 0, 3}}})
+        (Lexer::Token{lexer::FloatLiteral{21.0, Span{0, 0, 0, 0, 3}}})
     );
     std::stringstream errors{};
     lexer.printDiagnosticsTo(errors);
@@ -340,7 +340,7 @@ TEST(LexerTest, TupleAccessRecognition) {
     );
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::Integer{0, Span{0, 0, 0, 6, 7}}})
+        (Lexer::Token{lexer::IntegerLiteral{0, Span{0, 0, 0, 6, 7}}})
     );
     EXPECT_EQ(
         lexer.next(),
@@ -348,7 +348,7 @@ TEST(LexerTest, TupleAccessRecognition) {
     );
     EXPECT_EQ(
         lexer.next(),
-        (Lexer::Token{lexer::literal::Integer{1, Span{0, 0, 0, 8, 9}}})
+        (Lexer::Token{lexer::IntegerLiteral{1, Span{0, 0, 0, 8, 9}}})
     );
     std::stringstream errors{};
     lexer.printDiagnosticsTo(errors);

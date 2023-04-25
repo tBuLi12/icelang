@@ -35,27 +35,16 @@ struct Red {
 std::ostream& operator<<(std::ostream& stream, Red redText);
 
 namespace logs {
-class Message {
-  public:
-    virtual void printTo(std::ostream&) const = 0;
-    virtual ~Message() = default;
-};
-
-class SpannedMessage : public Message {
-  public:
-    SpannedMessage(Span _span, Source _source) : span(_span), source(_source) {}
-
-    virtual void printHeaderTo(std::ostream&) const = 0;
-    void printTo(std::ostream&) const override;
-
-    Span span;
-
-  protected:
+struct SpannedMessage {
     Source source;
+    Span span;
+    std::string_view type;
+    std::string header;
 
-  private:
     struct Formatter;
 };
+
+std::ostream& operator<<(std::ostream& stream, SpannedMessage const& redText);
 } // namespace logs
 
 #endif
