@@ -1,0 +1,8 @@
+---
+BasedOnStyle: LLVM
+IndentWidth: 4
+DerivePointerAlignment: false
+PointerAlignment: Left
+AlignAfterOpenBracket: BlockIndent
+AllowShortBlocksOnASingleLine: Empty
+AllowShortFunctionsOnASingleLine: Empty
