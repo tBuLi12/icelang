@@ -14,6 +14,7 @@ struct Span {
     size_t endHighlightOffset;
 
     Span to(Span other);
+    static Span null();
     Span extendBack(size_t offset);
     bool operator==(Span const&) const = default;
 };
@@ -45,6 +46,22 @@ struct SpannedMessage {
 };
 
 std::ostream& operator<<(std::ostream& stream, SpannedMessage const& redText);
+
+class MessageLog {
+  public:
+    std::vector<logs::SpannedMessage> diagnostics{};
+
+    void printDiagnosticsTo(std::ostream& stream) {
+        for (auto& message : diagnostics) {
+            stream << message;
+        }
+        diagnostics.clear();
+    }
+
+    bool errorsAreEmpty() const {
+        return diagnostics.size() == 0;
+    }
+};
 } // namespace logs
 
 #endif

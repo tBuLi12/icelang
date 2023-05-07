@@ -26,6 +26,8 @@ enable_testing()
 
 include_directories(${PROJECT_SOURCE_DIR}/src/lexer)
 include_directories(${PROJECT_SOURCE_DIR}/src/logs)
+include_directories(${PROJECT_SOURCE_DIR}/src/parser)
+include_directories(${PROJECT_SOURCE_DIR}/build/_deps/fmt-src/include)
 
 add_executable(
   lexerTests
@@ -39,8 +41,17 @@ add_executable(
   ${PROJECT_SOURCE_DIR}/src/logs/logs.cpp
 )
 
+add_executable(
+  parserTests
+  ${PROJECT_SOURCE_DIR}/tests/parser/parserTests.cpp
+  ${PROJECT_SOURCE_DIR}/src/parser/parser.cpp
+  ${PROJECT_SOURCE_DIR}/src/parser/ast.cpp
+  ${PROJECT_SOURCE_DIR}/src/logs/logs.cpp
+)
+
 target_link_libraries(
   lexerTests
+  fmt::fmt
   GTest::gtest_main
 )
 
@@ -49,7 +60,13 @@ target_link_libraries(
   GTest::gtest_main
 )
 
+target_link_libraries(
+  parserTests
+  fmt::fmt
+  GTest::gtest_main
+)
+
 include(GoogleTest)
-include(libfmt)
 gtest_discover_tests(lexerTests)
 gtest_discover_tests(logsTests)
+gtest_discover_tests(parserTests)

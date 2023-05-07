@@ -3,6 +3,10 @@
 #include <cmath>
 
 Span Span::to(Span other) {
+    if (other.firstLine == std::numeric_limits<size_t>::max()) {
+        return *this;
+    }
+
     return Span{
         firstLine,
         other.lastLine,
@@ -18,6 +22,10 @@ Span Span::extendBack(size_t offset) {
         beginOffset,        beginHighlightOffset - offset,
         endHighlightOffset,
     };
+}
+
+Span Span::null() {
+    return Span{std::numeric_limits<size_t>::max()};
 }
 
 std::ostream& operator<<(std::ostream& stream, Red redText) {
@@ -42,7 +50,7 @@ struct logs::SpannedMessage::Formatter {
 
     Formatter(std::ostream& _stream, logs::SpannedMessage const& message)
         : stream(_stream), source(message.source), span(message.span),
-          marginWidth(numberOfDigits(span.lastLine)) {}
+          marginWidth(numberOfDigits(span.lastLine + 1)) {}
 
     void printLineNumber(size_t lineNumber) const {
         stream << lineNumber + 1
@@ -98,7 +106,7 @@ struct logs::SpannedMessage::Formatter {
             source.stream.get();
             stream << '\n';
         }
-        stream << margin << '|';
+        stream << resetColor << margin << '|';
 
         if (span.firstLine == span.lastLine) {
             printRedSquiggles();

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <ostream>
 #include <ranges>
+#include <fmt/format.h>
 
 template <size_t N> struct String {
     char characters[N];
@@ -35,7 +36,7 @@ template <size_t N> struct String {
     }
 
     template <size_t M>
-    constexpr String<N + M - 1> operator+(String<M> const& second) {
+    constexpr String<N + M - 1> operator+(String<M> const& second) const {
         String<N + M - 1> summed{characters};
         std::ranges::copy(
             second.characters, std::begin(summed.characters) + N - 1
@@ -44,12 +45,16 @@ template <size_t N> struct String {
     }
 
     template <size_t M>
-    constexpr String<N + M - 1> operator+(const char (&second)[M]) {
+    constexpr String<N + M - 1> operator+(const char (&second)[M]) const {
         return *this + String{second};
     }
 
     constexpr char operator[](size_t index) const {
         return characters[index];
+    }
+
+    constexpr operator std::string_view() const {
+        return characters;
     }
 };
 
@@ -72,5 +77,11 @@ std::ostream& operator<<(std::ostream& stream, String<N> const& string) {
 }
 
 template <size_t N> String(const char (&)[N]) -> String<N>;
+
+template <size_t N> struct fmt::formatter<String<N>> : formatter<std::string> {
+    auto format(String<N> const& string, auto& ctx) const {
+        return fmt::format_to(ctx.out(), "{}", string.characters);
+    }
+};
 
 #endif

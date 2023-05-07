@@ -326,6 +326,31 @@ TEST(LexerTest, FloatLiteralWithoutDecimal) {
     EXPECT_TRUE(errors.str().empty());
 }
 
+TEST(LexerTest, SomeWeirdGeneric) {
+    using Lexer = lexer::WithPunctuations<",", "." ,"(", ")", "[", "]", "<", ">", "->", "{", "}", ":", "/", "*", "+", "-", ";", "=">::Lexer<>;
+    std::stringstream source{"<()>"};
+    Lexer lexer{Source{source, ""}};
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Punctuation<"<">{Span{0, 0, 0, 0, 1}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Punctuation<"(">{Span{0, 0, 0, 1, 2}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Punctuation<")">{Span{0, 0, 0, 2, 3}}})
+    );
+    EXPECT_EQ(
+        lexer.next(),
+        (Lexer::Token{lexer::Punctuation<">">{Span{0, 0, 0, 3, 4}}})
+    );
+    std::stringstream errors{};
+    lexer.printDiagnosticsTo(errors);
+    EXPECT_TRUE(errors.str().empty());
+}
+
 TEST(LexerTest, TupleAccessRecognition) {
     using Lexer = lexer::WithPunctuations<".", ",">::Lexer<>;
     std::stringstream source{"tuple.0.1"};

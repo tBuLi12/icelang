@@ -4,14 +4,15 @@
 #include "../logs/logs.h"
 #include "../string/string.h"
 #include <array>
+#include <fmt/format.h>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <ranges>
 #include <string>
+#include <utility>
 #include <variant>
-#include <format>
 
 namespace lexer {
 
@@ -19,6 +20,10 @@ struct Identifier {
     std::string value;
     Span span;
     bool operator==(Identifier const&) const = default;
+
+    operator std::string&&() && {
+        return std::move(value);
+    }
 };
 
 template <String name> struct Keyword {
@@ -36,12 +41,20 @@ struct IntegerLiteral {
     Span span;
 
     bool operator==(IntegerLiteral const&) const = default;
+
+    operator size_t() {
+        return value;
+    }
 };
 struct FloatLiteral {
     double value;
     Span span;
 
     bool operator==(FloatLiteral const&) const = default;
+
+    operator double() {
+        return value;
+    }
 };
 struct StringLiteral {
     std::string value;
@@ -76,7 +89,8 @@ constexpr std::array<std::pair<char, char>, 8> escapeSequences{{
 }};
 
 template <String... punctuations> struct WithPunctuations {
-    template <String... keywords> class Lexer {
+    template <String... keywords> class Lexer : public logs::MessageLog {
+
       public:
         using Token = std::variant<
             Keyword<keywords>..., Punctuation<punctuations>...,
@@ -84,13 +98,6 @@ template <String... punctuations> struct WithPunctuations {
             EndOfFile>;
 
         Lexer(Source _source) : source(_source) {}
-
-        void printDiagnosticsTo(std::ostream& stream) {
-            for (auto& message : diagnostics) {
-                stream << message;
-            }
-            diagnostics.clear();
-        }
 
         Token next() {
             auto nextToken = getNextToken();
@@ -103,13 +110,13 @@ template <String... punctuations> struct WithPunctuations {
             lastTokenWasDot = false;
         }
 
+        Source source;
+
       private:
         Token currentToken;
-        Source source;
         size_t offset = 0;
         size_t column = 0;
         size_t line = 0;
-        std::vector<logs::SpannedMessage> diagnostics{};
         bool lastTokenWasDot = false;
 
         Token getNextToken() {
@@ -149,6 +156,7 @@ template <String... punctuations> struct WithPunctuations {
                     );
                 }
             }
+            return EndOfFile{currentSpan().extendBack(1)};
         }
 
         Span currentSpan() const {
@@ -187,8 +195,7 @@ template <String... punctuations> struct WithPunctuations {
 
         template <String prefix, String punctuation>
         std::optional<Token> tryParseSinglePunctuation() {
-            if (punctuation.length() > prefix.length() &&
-                currentCharacter() == punctuation[prefix.length()]) {
+            if (currentCharacter() == punctuation[prefix.length()]) {
                 getNextCharacter();
 
                 static constexpr auto longerPrefix =
@@ -203,7 +210,10 @@ template <String... punctuations> struct WithPunctuations {
             requires((punctuations.startsWith(prefix) || ...))
         {
             auto token = (std::optional<Token>{} || ... || [this] {
-                return tryParseSinglePunctuation<prefix, punctuations>();
+                if constexpr (punctuations.length() > prefix.length() && punctuations.startsWith(prefix)) {
+                    return tryParseSinglePunctuation<prefix, punctuations>();
+                }
+                return std::optional<Token>{};
             });
 
             if (token) {
@@ -336,7 +346,7 @@ template <String... punctuations> struct WithPunctuations {
                     logMessage(
                         beginSpan.to(currentSpan()),
                         "numeric literal too large",
-                        std::format("cannot exceed {}", std::numeric_limits<size_t>::max())
+                        fmt::format("cannot exceed {}", std::numeric_limits<size_t>::max())
                     );
                 }
             } while (std::isdigit(currentCharacter()));
@@ -354,7 +364,7 @@ template <String... punctuations> struct WithPunctuations {
                     logMessage(
                         beginSpan.to(currentSpan()),
                         "numeric literal too large",
-                        std::format("cannot exceed {}", std::numeric_limits<size_t>::max())
+                        fmt::format("cannot exceed {}", std::numeric_limits<size_t>::max())
                     );
                 }
             }
@@ -416,7 +426,7 @@ template <String... punctuations> struct WithPunctuations {
                     logMessage(
                         currentSpan().extendBack(2),
                         "unknown escape sequence",
-                        std::format("\\{}", static_cast<char>(escapee))
+                        fmt::format("\\{}", static_cast<char>(escapee))
                     );
                 }
             }
