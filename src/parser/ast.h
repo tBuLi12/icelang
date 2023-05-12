@@ -374,6 +374,13 @@ struct AST {
 };
 } // namespace ast
 
+
+#ifdef __clang__
+#define CLANG_RUNTIME(string)  fmt::runtime(string)
+#else
+#define CLANG_RUNTIME(string)  string
+#endif
+
 template <> struct fmt::formatter<ast::Property> : formatter<std::string> {
     auto format(ast::Property const& property, auto& ctx) const {
         return property.value ? fmt::format_to(
@@ -460,13 +467,9 @@ template <> struct fmt::formatter<ast::VarBinding> : formatter<std::string> {
 template <> struct fmt::formatter<ast::Condition> : formatter<std::string> {
     auto format(ast::Condition const& condition, auto& ctx) const {
         std::visit(
-#ifdef __clang__
             [&](auto const& value) {
-                fmt::format_to(ctx.out(), fmt::runtime("{}"), value);
+                fmt::format_to(ctx.out(), CLANG_RUNTIME("{}"), value);
             },
-#else
-            [&](auto const& value) { fmt::format_to(ctx.out(), "{}", value); },
-#endif
             condition.value
         );
         return ctx.out();
@@ -503,7 +506,7 @@ template <> struct fmt::formatter<ast::NamedType> : formatter<std::string> {
 
 template <> struct fmt::formatter<ast::VectorType> : formatter<std::string> {
     auto format(ast::VectorType const& vector, auto& ctx) const {
-        return fmt::format_to(ctx.out(), "vector({})", *vector.elementType);
+        return fmt::format_to(ctx.out(), CLANG_RUNTIME("vector({})"), *vector.elementType);
     }
 };
 
@@ -533,7 +536,7 @@ template <String op>
 struct fmt::formatter<ast::Binary<op>> : formatter<std::string> {
     auto format(ast::Binary<op> const& binary, auto& ctx) const {
         return fmt::format_to(
-            ctx.out(), fmt::runtime("{}({},{})"), op.characters, *binary.lhs,
+            ctx.out(), CLANG_RUNTIME("{}({},{})"), op.characters, *binary.lhs,
             *binary.rhs
         );
     }
@@ -724,7 +727,7 @@ template <> struct fmt::formatter<ast::While> : formatter<std::string> {
 template <> struct fmt::formatter<ast::Expression> : formatter<std::string> {
     auto format(ast::Expression const& expression, auto& ctx) const {
         std::visit(
-            [&](auto const& value) { fmt::format_to(ctx.out(), "{}", value); },
+            [&](auto const& value) { fmt::format_to(ctx.out(), CLANG_RUNTIME("{}"), value); },
             expression.value
         );
         return ctx.out();
