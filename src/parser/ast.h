@@ -219,16 +219,16 @@ struct DestructureVector {
     std::vector<ElementPattern> items;
 };
 
-using PatternValue =
+using DestructureValue =
     std::variant<DestructureStruct, DestructureTuple, DestructureVector>;
 
 struct Destructure {
-    PatternValue value;
+    DestructureValue value;
 
-    Destructure(VariantElement<PatternValue> auto&& _value)
+    Destructure(VariantElement<DestructureValue> auto&& _value)
         : value(std::move(_value)){};
     Destructure(std::vector<Pattern>&& _value);
-    Destructure(PatternValue&& _value);
+    Destructure(DestructureValue&& _value);
 };
 
 struct PropertyPattern {
@@ -243,12 +243,12 @@ struct GuardedPattern {
     std::optional<Expression> guard;
 };
 
-using ThePatternValue = std::variant<Expression, GuardedPattern>;
+using PatternValue = std::variant<Expression, GuardedPattern>;
 
 struct Pattern {
-    ThePatternValue value;
+    PatternValue value;
 
-    Pattern(VariantElement<ThePatternValue> auto&& _value)
+    Pattern(VariantElement<PatternValue> auto&& _value)
         : value(std::move(_value)){};
 };
 
