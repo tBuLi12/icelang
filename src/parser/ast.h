@@ -2,6 +2,7 @@
 #define ICY_AST_H
 
 #include "../lexer/lexer.h"
+#include "../semanticAnalyzer/types.h"
 #include "../utils.h"
 
 #include <optional>
@@ -10,7 +11,7 @@
 using Lexer = lexer::WithPunctuations<
     ",", ".", "(", ")", "[", "]", "<", ">", "<=", ">=", "->", "{", "}", ":",
     ":<", "/", "*", "+", "-", ";", "=", "!", "==", "!=", "&&", "||", "..", "=>",
-    "&">::
+    "&", "@">::
     Lexer<
         "fun", "type", "break", "return", "continue", "if", "while", "else",
         "match", "let", "var", "as", "is", "trait", "def">;
@@ -25,11 +26,15 @@ template <String op> struct Binary {
     Span span;
     UPtr<Expression> lhs;
     UPtr<Expression> rhs;
+
+    TraitMethodRef methodRef;
+    Type type;
 };
 
 template <String op> struct Prefix {
     Span span;
     UPtr<Expression> rhs;
+    Type type;
 };
 
 struct Condition;
@@ -40,12 +45,16 @@ struct If {
     UPtr<Expression> trueBranch;
     std::optional<UPtr<Expression>> falseBranch;
     bool hasSameTypeBranch;
+    Type type;
 };
 
 struct While {
     Span span;
     UPtr<Condition> condition;
     UPtr<Expression> body;
+    Type type;
+
+    bool useBody;
 };
 
 struct TypeName;
@@ -56,8 +65,14 @@ struct TraitName {
     std::vector<TypeName> typeArgumentNames;
 };
 
+struct Annotation {
+    Span span;
+    std::string name;
+};
+
 struct NamedType {
     Span span;
+    std::optional<Annotation> annotation;
     lexer::Identifier name;
     std::vector<TypeName> typeArgumentNames;
 };
@@ -87,6 +102,7 @@ struct Cast {
     Span span;
     UPtr<Expression> lhs;
     TypeName typeName;
+    Type type;
 };
 
 struct MatchCase;
@@ -95,6 +111,9 @@ struct Match {
     Span span;
     UPtr<Expression> scrutinee;
     std::vector<MatchCase> body;
+
+    bool sameTypeResult;
+    Type type;
 };
 
 struct BlockItem;
@@ -103,6 +122,7 @@ struct Block {
     Span span;
     std::vector<BlockItem> items;
     bool hasTrailingExpression;
+    Type type;
 };
 
 struct PropertyDeclaration {
@@ -114,6 +134,7 @@ struct PropertyDeclaration {
 struct TupleLiteral {
     Span span;
     std::vector<Expression> fields;
+    Type type;
 };
 
 struct Property;
@@ -121,7 +142,10 @@ struct Property;
 struct StructLiteral {
     Span span;
     std::vector<Property> properties;
-    std::optional<lexer::Identifier> name;
+    std::optional<NamedType> name;
+
+    std::optional<type::Named> namedType;
+    Type type;
 };
 
 struct VectorElementType {
@@ -138,6 +162,9 @@ struct VectorElements {
 struct VectorLiteral {
     Span span;
     std::variant<VectorElementType, VectorElements> content;
+
+    Type elementType;
+    Type type;
 };
 
 struct Call {
@@ -145,6 +172,9 @@ struct Call {
     UPtr<Expression> lhs;
     std::vector<TypeName> typeArgumentNames;
     std::vector<Expression> argValues;
+
+    std::variant<type::Named, Function, TraitMethodRef> target;
+    Type type;
 };
 
 struct PropertyAccess {
@@ -152,23 +182,61 @@ struct PropertyAccess {
     UPtr<Expression> lhs;
     std::optional<TraitName> traitName;
     lexer::Identifier property;
+
+    size_t propertyIdx;
+    size_t namedDepth;
+    Type type;
 };
 
 struct TupleFieldAccess {
     Span span;
     UPtr<Expression> lhs;
     lexer::IntegerLiteral propertyIdx;
+
+    size_t namedDepth;
+    Type type;
 };
 
 struct IndexAccess {
     Span span;
     UPtr<Expression> lhs;
     UPtr<Expression> index;
+
+    Type elementType;
+    Type type;
+};
+
+struct LetBinding;
+struct Parameter;
+struct VarBinding;
+struct Variable;
+
+struct Use {
+    Variable* usee;
+    size_t controlFlowDepth;
+};
+
+struct Binding {
+    llvm::Value* value;
+    Type type;
+    bool isMutable;
+    Use lastUse;
 };
 
 struct Variable {
     Span span;
     std::string name;
+
+    size_t binding;
+    bool mayMove;
+};
+
+struct TypeExpression {
+    Span span;
+    TypeName value;
+
+    Type theType;
+    Type type;
 };
 
 using ExpressionValue = std::variant<
@@ -177,18 +245,21 @@ using ExpressionValue = std::variant<
     PropertyAccess, TupleFieldAccess, IndexAccess, Cast, Binary<"+">,
     Binary<"*">, Binary<"==">, Binary<"!=">, Binary<"&&">, Binary<"||">,
     Binary<">=">, Binary<"<=">, Binary<"<">, Binary<">">, Binary<"=">,
-    Binary<"/">, Binary<"-">, Prefix<"-">, Prefix<"!">, VectorLiteral>;
+    Binary<"/">, Binary<"-">, Prefix<"-">, Prefix<"!">, VectorLiteral,
+    TypeExpression>;
 
 struct Expression {
     ExpressionValue value;
 
     Expression(VariantElement<ExpressionValue> auto&& _value)
         : value(std::move(_value)){};
+    Expression(ExpressionValue&& _value);
 };
 
 struct Spread {
     Span span;
     Expression value;
+    Type type;
 };
 
 struct VectorElement {
@@ -201,7 +272,9 @@ struct PropertyPattern;
 struct DestructureStruct {
     Span span;
     std::vector<PropertyPattern> properties;
-    std::optional<lexer::Identifier> name;
+    std::optional<NamedType> name;
+
+    Type type;
 };
 
 struct ElementPattern;
@@ -210,12 +283,16 @@ struct Pattern;
 struct DestructureTuple {
     Span span;
     std::vector<Pattern> fields;
-    std::optional<lexer::Identifier> name;
+    std::optional<NamedType> name;
+
+    Type type;
 };
 
 struct DestructureVector {
     Span span;
     std::vector<ElementPattern> items;
+
+    Type elementType;
 };
 
 using DestructureValue =
@@ -243,6 +320,8 @@ struct PatternBody {
 
     PatternBody(VariantElement<PatternValue> auto&& _value)
         : value(std::move(_value)){};
+
+    bool anonymous;
 };
 
 struct Pattern {
@@ -258,6 +337,8 @@ struct PropertyPattern {
     Span span;
     Expression property;
     std::optional<PatternBody> pattern;
+
+    std::vector<size_t> propertyIndices;
 };
 
 struct RestElements {
@@ -327,6 +408,8 @@ struct Parameter {
     Span span;
     lexer::Identifier name;
     TypeName typeName;
+
+    Type type;
 };
 
 struct TypeParameter {
@@ -337,10 +420,14 @@ struct TypeParameter {
 
 struct Signature {
     Span span;
+    std::optional<Annotation> annotation;
     lexer::Identifier name;
     std::vector<TypeParameter> typeParameterNames;
     std::vector<Parameter> parameters;
     std::optional<TypeName> returnTypeName;
+
+    std::vector<std::pair<Type, Trait>> traitBounds;
+    Type returnType;
 };
 
 struct FunctionDeclaration : Signature {
@@ -357,6 +444,8 @@ struct TypeDeclaration {
     lexer::Identifier name;
     std::vector<TypeParameter> typeParameterNames;
     TypeName protoName;
+
+    Type proto;
 };
 
 struct TraitDeclaration {
@@ -364,6 +453,8 @@ struct TraitDeclaration {
     lexer::Identifier name;
     std::vector<TypeParameter> typeParameterNames;
     std::vector<Signature> signatures;
+
+    std::vector<std::pair<Type, Trait>> traitBounds;
 };
 
 struct TraitImplementation {
@@ -372,6 +463,10 @@ struct TraitImplementation {
     TypeName typeName;
     TraitName traitName;
     std::vector<FunctionDeclaration> implementations;
+
+    Trait trait;
+    Type type;
+    std::vector<std::pair<Type, Trait>> traitBounds;
 };
 
 struct Program {
@@ -382,11 +477,10 @@ struct Program {
 };
 } // namespace ast
 
-
 #ifdef __clang__
-#define CLANG_RUNTIME(string)  fmt::runtime(string)
+#define CLANG_RUNTIME(string) fmt::runtime(string)
 #else
-#define CLANG_RUNTIME(string)  string
+#define CLANG_RUNTIME(string) string
 #endif
 
 template <> struct fmt::formatter<ast::Property> : formatter<std::string> {
@@ -514,7 +608,9 @@ template <> struct fmt::formatter<ast::NamedType> : formatter<std::string> {
 
 template <> struct fmt::formatter<ast::VectorType> : formatter<std::string> {
     auto format(ast::VectorType const& vector, auto& ctx) const {
-        return fmt::format_to(ctx.out(), CLANG_RUNTIME("vector({})"), *vector.elementType);
+        return fmt::format_to(
+            ctx.out(), CLANG_RUNTIME("vector({})"), *vector.elementType
+        );
     }
 };
 
@@ -735,7 +831,9 @@ template <> struct fmt::formatter<ast::While> : formatter<std::string> {
 template <> struct fmt::formatter<ast::Expression> : formatter<std::string> {
     auto format(ast::Expression const& expression, auto& ctx) const {
         std::visit(
-            [&](auto const& value) { fmt::format_to(ctx.out(), CLANG_RUNTIME("{}"), value); },
+            [&](auto const& value) {
+                fmt::format_to(ctx.out(), CLANG_RUNTIME("{}"), value);
+            },
             expression.value
         );
         return ctx.out();
@@ -772,6 +870,13 @@ template <> struct fmt::formatter<ast::MatchArm> : formatter<std::string> {
 template <> struct fmt::formatter<ast::Cast> : formatter<std::string> {
     auto format(ast::Cast const& cast, auto& ctx) const {
         return fmt::format_to(ctx.out(), "as({},{})", *cast.lhs, cast.typeName);
+    }
+};
+
+template <>
+struct fmt::formatter<ast::TypeExpression> : formatter<std::string> {
+    auto format(ast::TypeExpression const& typeExpression, auto& ctx) const {
+        return fmt::format_to(ctx.out(), "texpr({})", typeExpression.value);
     }
 };
 
@@ -827,8 +932,7 @@ struct fmt::formatter<ast::PropertyPattern> : formatter<std::string> {
     }
 };
 
-template <>
-struct fmt::formatter<ast::PatternBody> : formatter<std::string> {
+template <> struct fmt::formatter<ast::PatternBody> : formatter<std::string> {
     template <class FormatContext>
     auto format(ast::PatternBody const& body, FormatContext& ctx) const {
         std::visit(
@@ -838,7 +942,6 @@ struct fmt::formatter<ast::PatternBody> : formatter<std::string> {
         return ctx.out();
     }
 };
-
 
 template <>
 struct fmt::formatter<ast::DestructureStruct> : formatter<std::string> {
@@ -1007,6 +1110,11 @@ struct SpanPrinter {
 
     void operator()(ast::Expression const& value) {
         std::visit([this](auto const& val) { (*this)(val); }, value.value);
+    }
+
+    void operator()(ast::TypeExpression const& typeExpression) {
+        printSpan(typeExpression);
+        (*this)(typeExpression.value);
     }
 
     void operator()(ast::Cast const& cast) {

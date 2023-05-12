@@ -1,10 +1,17 @@
 cmake_minimum_required(VERSION 3.14)
 
+set(CMAKE_CXX_COMPILER clang++)
+set(CMAKE_C_COMPILER clang)
+
+
 project(Icy VERSION 0.0.1)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
+set(LLVM_PATH "C:/Users/tbuli/Apps/DEV/LLVM-test")
+
+set(CMAKE_BUILD_TYPE Release)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -27,7 +34,11 @@ enable_testing()
 include_directories(${PROJECT_SOURCE_DIR}/src/lexer)
 include_directories(${PROJECT_SOURCE_DIR}/src/logs)
 include_directories(${PROJECT_SOURCE_DIR}/src/parser)
+include_directories(${PROJECT_SOURCE_DIR}/src/semanticAnalyzer)
+include_directories(${PROJECT_SOURCE_DIR}/src/IREmmiter)
 include_directories(${PROJECT_SOURCE_DIR}/build/_deps/fmt-src/include)
+include_directories(${LLVM_PATH}/llvm/llvm/include)
+include_directories(${LLVM_PATH}/build/include)
 
 add_executable(
   lexerTests
@@ -48,6 +59,15 @@ add_executable(
   ${PROJECT_SOURCE_DIR}/src/logs/logs.cpp
 )
 
+add_executable(
+  icy
+  ${PROJECT_SOURCE_DIR}/src/icy.cpp
+  ${PROJECT_SOURCE_DIR}/src/semanticAnalyzer/types.cpp
+  ${PROJECT_SOURCE_DIR}/src/parser/parser.cpp
+  ${PROJECT_SOURCE_DIR}/src/parser/ast.cpp
+  ${PROJECT_SOURCE_DIR}/src/logs/logs.cpp
+)
+
 target_link_libraries(
   lexerTests
   fmt::fmt
@@ -63,6 +83,100 @@ target_link_libraries(
   parserTests
   fmt::fmt
   GTest::gtest_main
+)
+
+add_link_options(-nodefaultlib:libcmt)
+
+target_link_libraries(
+  icy
+  ${llvm_libs}
+  fmt::fmt
+  "${LLVM_PATH}/build/Release/lib/LLVMWindowsManifest.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMXRay.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMLibDriver.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMDlltoolDriver.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMCoverage.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMLineEditor.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMX86TargetMCA.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMX86Disassembler.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMX86AsmParser.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMX86CodeGen.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMX86Desc.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMX86Info.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMOrcJIT.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMWindowsDriver.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMMCJIT.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMJITLink.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMInterpreter.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMExecutionEngine.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMRuntimeDyld.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMOrcTargetProcess.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMOrcShared.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMDWP.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMDebugInfoLogicalView.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMDebugInfoGSYM.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMOption.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMObjectYAML.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMObjCopy.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMMCA.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMMCDisassembler.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMLTO.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMPasses.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMCFGuard.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMCoroutines.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMipo.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMVectorize.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMLinker.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMInstrumentation.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMFrontendOpenMP.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMFrontendOpenACC.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMFrontendHLSL.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMExtensions.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMDWARFLinker.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMGlobalISel.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMMIRParser.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMAsmPrinter.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMSelectionDAG.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMCodeGen.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMObjCARCOpts.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMIRPrinter.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMInterfaceStub.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMFileCheck.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMFuzzMutate.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMTarget.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMScalarOpts.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMInstCombine.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMAggressiveInstCombine.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMTransformUtils.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMBitWriter.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMAnalysis.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMProfileData.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMSymbolize.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMDebugInfoPDB.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMDebugInfoMSF.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMDebugInfoDWARF.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMObject.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMTextAPI.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMMCParser.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMIRReader.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMAsmParser.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMMC.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMDebugInfoCodeView.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMBitReader.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMFuzzerCLI.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMCore.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMRemarks.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMBitstreamReader.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMBinaryFormat.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMTargetParser.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMTableGen.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMSupport.lib"
+  "${LLVM_PATH}/build/Release/lib/LLVMDemangle.lib"
+  "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/um/x64/psapi.lib"
+  "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/um/x64/shell32.lib"
+  "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/um/x64/ole32.lib"
+  "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/um/x64/uuid.lib"
+  "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/um/x64/advapi32.lib"
 )
 
 include(GoogleTest)

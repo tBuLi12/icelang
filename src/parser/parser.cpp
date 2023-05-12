@@ -156,6 +156,7 @@ template <> constexpr String expected<PropertyAccess> = "a property name";
 template <> constexpr String expected<Block> = "a block";
 template <> constexpr String expected<FunctionBody> = "{ or ->";
 template <> constexpr String expected<PrefixGuard> = "a guard";
+template <> constexpr String expected<Annotation> = "an annotation";
 
 template <class L, class... ops>
 constexpr String expected<PrecedenceGroup<L, ops...>> = expected<L>;
@@ -509,21 +510,52 @@ class Parser : public logs::MessageLog {
 
     std::optional<Expression>
     parse(Rule<std::variant<Variable, StructLiteral>>) {
-        auto parsed =
-            parse(ident + option("{"_p + separatedWith<",">(property) + "}"_p));
-        if (!parsed) {
+        auto name = parse(ident);
+        if (!name) {
             return {};
         }
 
-        auto [name, literal] = std::move(parsed->value);
+        auto typeArguments =
+            parse(":<"_p + separatedWith<",">(typeName) + ">"_p);
+        auto literal = parse("{"_p + separatedWith<",">(property) + "}"_p);
+
         if (literal) {
+            auto tArgs = typeArguments ? std::move(typeArguments->value)
+                                       : std::vector<TypeName>{};
             return Expression{StructLiteral{
-                parsed->span,
-                std::move(literal.value()),
-                std::move(name),
+                name->span.to(literal->span),
+                std::move(literal->value),
+                NamedType{
+                    name->span.to(typeArguments->span),
+                    {},
+                    name.value(),
+                    std::move(tArgs)},
             }};
         }
-        return Expression{Variable{name.span, std::move(name)}};
+
+        if (!typeArguments) {
+            return Variable{name->span, name->value};
+        }
+
+        auto args = parse("("_p + separatedWith<",">(expression) + ")"_p);
+        if (args) {
+            return Call{
+                name->span.to(args->span),
+                Expression{Variable{name->span, name->value}},
+                std::move(typeArguments->value),
+                std::move(args->value),
+            };
+        }
+
+        return TypeExpression{
+            name->span.to(typeArguments->span),
+            TypeName{NamedType{
+                name->span.to(typeArguments->span),
+                {},
+                std::move(name.value()),
+                std::move(typeArguments->value),
+            }},
+        };
     }
 
     std::optional<Pattern> parse(Rule<Pattern>) {
@@ -531,7 +563,8 @@ class Parser : public logs::MessageLog {
         if (name) {
             auto tuple = parse(destructureTuple);
             if (tuple) {
-                tuple->name = std::move(name);
+                tuple->name =
+                    NamedType{name->span, {}, std::move(name->value), {}};
                 tuple->span = name->span.to(tuple->span);
                 return parseExplicitGuard(Destructure{std::move(tuple.value())}
                 );
@@ -539,7 +572,8 @@ class Parser : public logs::MessageLog {
 
             auto structure = parse(destructureStruct);
             if (structure) {
-                structure->name = std::move(name);
+                structure->name =
+                    NamedType{name->span, {}, std::move(name->value), {}};
                 structure->span = name->span.to(structure->span);
                 return parseExplicitGuard(Destructure{
                     std::move(structure.value())});

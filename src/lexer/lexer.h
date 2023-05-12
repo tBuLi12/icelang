@@ -1,6 +1,8 @@
 #ifndef ICY_LEXER_H
 #define ICY_LEXER_H
 
+#define _ITERATOR_DEBUG_LEVEL 0
+
 #include "../logs/logs.h"
 #include "../string/string.h"
 #include <array>
@@ -93,9 +95,8 @@ template <String... punctuations> struct WithPunctuations {
 
       public:
         using Token = std::variant<
-            Keyword<keywords>..., Punctuation<punctuations>...,
-            IntegerLiteral, FloatLiteral, StringLiteral, Identifier,
-            EndOfFile>;
+            Keyword<keywords>..., Punctuation<punctuations>..., IntegerLiteral,
+            FloatLiteral, StringLiteral, Identifier, EndOfFile>;
 
         Lexer(Source _source) : source(_source) {}
 
@@ -150,8 +151,7 @@ template <String... punctuations> struct WithPunctuations {
 
                 if (offsetBeforeTrying == offset) {
                     logMessage(
-                        currentSpan().extendBack(1),
-                        "unrecognized token",
+                        currentSpan().extendBack(1), "unrecognized token",
                         std::string{static_cast<char>(getNextCharacter())}
                     );
                 }
@@ -163,7 +163,8 @@ template <String... punctuations> struct WithPunctuations {
             return Span{line, line, offset - column, column, column};
         }
 
-        void logMessage(Span span, std::string_view type, std::string&& header) {
+        void
+        logMessage(Span span, std::string_view type, std::string&& header) {
             diagnostics.push_back(logs::SpannedMessage{
                 source,
                 span,
@@ -230,8 +231,7 @@ template <String... punctuations> struct WithPunctuations {
 
             logMessage(
                 currentSpan().extendBack(prefix.length() + 1),
-                "unknown punctuation",
-                std::move(unknownPuncutation)
+                "unknown punctuation", std::move(unknownPuncutation)
             );
 
             return {};
@@ -346,7 +346,10 @@ template <String... punctuations> struct WithPunctuations {
                     logMessage(
                         beginSpan.to(currentSpan()),
                         "numeric literal too large",
-                        fmt::format("cannot exceed {}", std::numeric_limits<size_t>::max())
+                        fmt::format(
+                            "cannot exceed {}",
+                            std::numeric_limits<size_t>::max()
+                        )
                     );
                 }
             } while (std::isdigit(currentCharacter()));
@@ -364,7 +367,10 @@ template <String... punctuations> struct WithPunctuations {
                     logMessage(
                         beginSpan.to(currentSpan()),
                         "numeric literal too large",
-                        fmt::format("cannot exceed {}", std::numeric_limits<size_t>::max())
+                        fmt::format(
+                            "cannot exceed {}",
+                            std::numeric_limits<size_t>::max()
+                        )
                     );
                 }
             }
@@ -392,8 +398,7 @@ template <String... punctuations> struct WithPunctuations {
                 if (character == EOF) {
                     logMessage(
                         currentSpan().extendBack(1),
-                        "non-terminated string literal",
-                        "expected \""
+                        "non-terminated string literal", "expected \""
                     );
                     return {};
                 } else if (character == '\\') {
@@ -412,8 +417,7 @@ template <String... punctuations> struct WithPunctuations {
             int escapee = getNextCharacter();
             if (escapee == EOF) {
                 logMessage(
-                    currentSpan().extendBack(1),
-                    "unknown escape sequence",
+                    currentSpan().extendBack(1), "unknown escape sequence",
                     "\\(EOF)"
                 );
             } else {
@@ -424,8 +428,7 @@ template <String... punctuations> struct WithPunctuations {
                     literal.push_back(resolved->second);
                 } else {
                     logMessage(
-                        currentSpan().extendBack(2),
-                        "unknown escape sequence",
+                        currentSpan().extendBack(2), "unknown escape sequence",
                         fmt::format("\\{}", static_cast<char>(escapee))
                     );
                 }

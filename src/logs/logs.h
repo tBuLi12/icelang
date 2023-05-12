@@ -1,6 +1,8 @@
 #ifndef ICY_LOGS_H
 #define ICY_LOGS_H
 
+#define _ITERATOR_DEBUG_LEVEL 0
+
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -43,6 +45,8 @@ struct SpannedMessage {
     std::string header;
 
     struct Formatter;
+
+    void printBodyTo(std::ostream&) const;
 };
 
 std::ostream& operator<<(std::ostream& stream, SpannedMessage const& redText);

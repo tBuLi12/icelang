@@ -179,7 +179,7 @@ constexpr auto guard = createPrecedenceHierarchy(prefixGuard);
 constexpr auto tupleExpression = as<Expression>(singleOrMultipleAs<TupleLiteral>(expression));
 
 RULE(PropertyDeclaration, propertyDeclaration) = ident + ":"_p + typeName;
-RULE(NamedType, namedType) = ident + optionOrDefault("<"_p + separatedWith<",">(typeName) + ">"_p);
+RULE(NamedType, namedType) = option("@"_p + as<Annotation>(ident)) + ident + optionOrDefault("<"_p + separatedWith<",">(typeName) + ">"_p);
 RULE(TupleType, tupleType) = "("_p + separatedWith<",">(typeName) + ")"_p;
 RULE(StructType, structType) = "{"_p + separatedWith<",">(propertyDeclaration) + "}"_p;
 RULE(VectorType, vectorType) = "["_p + typeName + "]"_p;
@@ -235,7 +235,7 @@ RULE(PrefixGuard, _prefixGuard) = as<Expression>(
 RULE(TypeParameter, typeParameter) = ident + optionOrDefault("is"_kw + separatedWith<"&">(traitName));
 constexpr auto typeParameterList = optionOrDefault("<"_p + separatedWith<",">(typeParameter) + ">"_p);
 
-RULE(Signature, signature) = "fun"_kw + ident +  typeParameterList + "("_p + separatedWith<",">(parameter) + ")"_p + option(":"_p + typeName);
+RULE(Signature, signature) = option("@"_p + as<Annotation>(ident)) + "fun"_kw + ident +  typeParameterList + "("_p + separatedWith<",">(parameter) + ")"_p + option(":"_p + typeName);
 RULE(TypeDeclaration, typeDeclaration) = "type"_kw + ident + typeParameterList + typeName;
 RULE(TraitDeclaration, traitDeclaration) = "trait"_kw + ident + typeParameterList + "{"_p + list(signature) + "}"_p;
 RULE(FunctionBody, functionBody) = as<Expression>(as<Expression>("->"_p + tupleExpression) | as<Expression>(block));

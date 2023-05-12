@@ -3,6 +3,10 @@
 #include <cmath>
 
 Span Span::to(Span other) {
+    if (firstLine == std::numeric_limits<size_t>::max()) {
+        return other;
+    }
+
     if (other.firstLine == std::numeric_limits<size_t>::max()) {
         return *this;
     }
@@ -121,7 +125,11 @@ struct logs::SpannedMessage::Formatter {
 namespace logs {
 std::ostream& operator<<(std::ostream& stream, SpannedMessage const& message) {
     stream << Red{message.type} << ": " << message.header << std::endl;
-    SpannedMessage::Formatter{stream, message}.print();
+    message.printBodyTo(stream);
     return stream;
+}
+
+void SpannedMessage::printBodyTo(std::ostream& stream) const {
+    Formatter{stream, *this}.print();
 }
 } // namespace logs

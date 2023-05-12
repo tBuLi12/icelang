@@ -1,6 +1,6 @@
-#include <sstream>
-
 #include "logs.h"
+
+#include <sstream>
 #include <gtest/gtest.h>
 
 TEST(LogsTest, SpannedMessageMultipleLines) {

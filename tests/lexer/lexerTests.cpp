@@ -1,6 +1,6 @@
-#include <sstream>
-
 #include "lexer.h"
+
+#include <sstream>
 #include <gtest/gtest.h>
 
 TEST(LexerTest, Keywords) {

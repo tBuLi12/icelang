@@ -1,7 +1,10 @@
 #ifndef ICY_UTILS_H
 #define ICY_UTILS_H
 
+
 #include <variant>
+#include <memory>
+#include <algorithm>
 
 template <class... Fs> struct match : Fs... {
     using Fs::operator()...;
@@ -39,5 +42,16 @@ template <class Out> struct PushUnique<Out, std::variant<>> {
 
 template <class... Ts>
 using VariantWithoutDuplicates = typename PushUnique<std::variant<>, std::variant<Ts...>>::type;
+
+template <class K, class V, size_t N>
+struct ConstMap {
+    std::array<std::pair<K, V>, N> content;
+
+    constexpr ConstMap(std::array<std::pair<K, V>, N> arr) : content(arr) {}
+
+    constexpr V operator[](K const& key) {
+        return std::ranges::find(content, key, &std::pair<K, V>::first);
+    }
+};
 
 #endif
