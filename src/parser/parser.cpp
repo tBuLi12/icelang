@@ -650,7 +650,7 @@ class Parser : public logs::MessageLog {
         }
 
         auto [items, hasTrailingSemicolon] = std::move(parsed->value);
-        bool hasTrailingExpression = !hasTrailingSemicolon && items.size() > 1;
+        bool hasTrailingExpression = !hasTrailingSemicolon && items.size() > 0;
         return Block{parsed->span, std::move(items), hasTrailingExpression};
     }
 
