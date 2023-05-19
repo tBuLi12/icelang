@@ -171,6 +171,7 @@ template <class S, class T, bool b>
 constexpr String expected<SeparatedWith<S, T, b>> = expected<T>;
 
 template <class T, class R> constexpr String expected<As<T, R>> = expected<T>;
+template <class T, class M> constexpr String expected<SingleOrMultiple<M, T>> = expected<T>;
 
 template <class T, class... Ts>
 constexpr String expected<std::variant<T, Ts...>> =
@@ -541,7 +542,7 @@ class Parser : public logs::MessageLog {
             Expression guardPattern{
                 Variable{name->span, std::move(name.value())}};
             continueParsingExpression(guardPattern, guard);
-            return guardPattern;
+            return Pattern{spanOf(guardPattern), std::move(guardPattern), {}};
         }
         auto parsed = parse(destructure);
         if (parsed) {
@@ -550,20 +551,20 @@ class Parser : public logs::MessageLog {
 
         auto expression = parse(guard);
         if (expression) {
-            return std::move(expression.value());
+            return Pattern{spanOf(expression.value()), std::move(expression.value()), {}};
         }
 
         return {};
     }
 
-    Pattern parseExplicitGuard(Destructure&& pattern) {
+    Pattern parseExplicitGuard(PatternBody&& body) {
         auto guard = parse("if"_kw + orExpression);
         if (guard) {
-            return Pattern{GuardedPattern{
-                spanOf(pattern).to(guard->span), std::move(pattern),
-                std::optional{std::move(guard->value)}}};
+            return Pattern{
+                spanOf(body).to(guard->span), std::move(body),
+                std::optional{std::move(guard->value)}};
         }
-        return Pattern{GuardedPattern{spanOf(pattern), std::move(pattern)}};
+        return Pattern{spanOf(body), std::move(body), {}};
     }
 
     template <class M, class P>

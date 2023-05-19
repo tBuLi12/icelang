@@ -74,7 +74,7 @@ PARSE(GenericImplementation, "def<T> [T] as Collection { fun length() -> this.le
 PARSE_FAIL(NoFun, "name() -> 3", "");
 PARSE_FAIL(NoBody, "fun name() ->", "");
 PARSE_FAIL(NonBlockBody, "fun name() 3", "");
-PARSE_FAIL(MissingSemicolon, "fun name() { invoke() 7 }", "fun(name,,block(call(invoke,),))");
+PARSE_FAIL(MissingSemicolon, "fun name() { invoke() 7 }", "fun(name,,block(call(invoke,)))");
 PARSE_FAIL(MissingColon, "fun name() -> { prop: value, second value }", "fun(name,,struct(prop:value,second))");
 PARSE_FAIL(MissingParenthases, "fun name() -> if condition) 3 else 5", "fun(name,,if(condition,3,5))");
 PARSE_FAIL(MatchStruct, "fun name() -> match name { prop: value } { a => b }", "");
@@ -127,7 +127,7 @@ TEST(ParserTest, Spans) {
     EXPECT_EQ(std::get<ast::Variable>(match.scrutinee->value).span, (Span{15, 15, 411, 36, 39}));
     auto& firstCase = match.body.at(0);
     EXPECT_EQ(firstCase.span, (Span{16, 16, 453, 20, 72}));
-    auto& pattern = std::get<ast::DestructureStruct>(std::get<ast::GuardedPattern>(firstCase.pattern.value).pattern.value);
+    auto& pattern = std::get<ast::DestructureStruct>(std::get<ast::Destructure>(firstCase.pattern.body.value).value);
     auto& arm = std::get<ast::Binary<"+">>(std::get<ast::Expression>(firstCase.value.value).value);
     EXPECT_EQ(pattern.span, (Span{16, 16, 453, 20, 40}));
     auto& firstProp = pattern.properties.at(0);

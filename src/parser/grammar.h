@@ -175,7 +175,7 @@ constexpr auto orExpression = createPrecedenceHierarchy(prefixExpression);
 constexpr auto guard = createPrecedenceHierarchy(prefixGuard);
 
 constexpr auto tupleExpression = as<Expression>(singleOrMultipleAs<TupleLiteral>(expression));
-constexpr auto openPattern = as<Pattern>(singleOrMultipleAs<GuardedPattern>(pattern));
+constexpr auto openPattern = singleOrMultipleAs<DestructureTuple>(pattern);
 
 RULE(PropertyDeclaration, propertyDeclaration) = ident + ":"_p + typeName;
 RULE(NamedType, namedType) = ident + optionOrDefault("<"_p + separatedWith<",">(typeName) + ">"_p);

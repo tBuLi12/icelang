@@ -204,7 +204,6 @@ struct DestructureStruct {
     std::optional<lexer::Identifier> name;
 };
 
-struct GuardedPattern;
 struct ElementPattern;
 struct Pattern;
 
@@ -231,25 +230,34 @@ struct Destructure {
     Destructure(DestructureValue&& _value);
 };
 
+// struct GuardedPattern {
+//     Span span;
+//     Destructure pattern;
+//     std::optional<Expression> guard;
+// };
+
+using PatternValue = std::variant<Expression, Destructure>;
+
+struct PatternBody {
+    PatternValue value;
+
+    PatternBody(VariantElement<PatternValue> auto&& _value)
+        : value(std::move(_value)){};
+};
+
+struct Pattern {
+    Span span;
+    PatternBody body;
+    std::optional<Expression> guard;
+
+    Pattern(DestructureTuple&& destructure);
+    Pattern(Span _span, PatternBody&& _body, std::optional<Expression>&& guard);
+};
+
 struct PropertyPattern {
     Span span;
     Expression property;
-    std::optional<Destructure> pattern;
-};
-
-struct GuardedPattern {
-    Span span;
-    Destructure pattern;
-    std::optional<Expression> guard;
-};
-
-using PatternValue = std::variant<Expression, GuardedPattern>;
-
-struct Pattern {
-    PatternValue value;
-
-    Pattern(VariantElement<PatternValue> auto&& _value)
-        : value(std::move(_value)){};
+    std::optional<PatternBody> pattern;
 };
 
 struct RestElements {
@@ -769,10 +777,16 @@ template <> struct fmt::formatter<ast::Cast> : formatter<std::string> {
 
 template <> struct fmt::formatter<ast::Pattern> : formatter<std::string> {
     auto format(ast::Pattern const& pattern, auto& ctx) const {
+        if (pattern.guard) {
+            fmt::format_to(ctx.out(), "guard(");
+        }
         std::visit(
             [&](auto const& value) { fmt::format_to(ctx.out(), "{}", value); },
-            pattern.value
+            pattern.body.value
         );
+        if (pattern.guard) {
+            fmt::format_to(ctx.out(), ",{})", pattern.guard.value());
+        }
         return ctx.out();
     }
 };
@@ -812,6 +826,20 @@ struct fmt::formatter<ast::PropertyPattern> : formatter<std::string> {
         return ctx.out();
     }
 };
+
+template <>
+struct fmt::formatter<ast::PatternBody> : formatter<std::string> {
+    template <class FormatContext>
+    auto format(ast::PatternBody const& body, FormatContext& ctx) const {
+        std::visit(
+            [&](auto const& value) { fmt::format_to(ctx.out(), "{}", value); },
+            body.value
+        );
+        return ctx.out();
+    }
+};
+
+
 template <>
 struct fmt::formatter<ast::DestructureStruct> : formatter<std::string> {
     auto format(ast::DestructureStruct const& structure, auto& ctx) const {
@@ -846,19 +874,6 @@ template <> struct fmt::formatter<ast::Destructure> : formatter<std::string> {
             pattern.value
         );
         return ctx.out();
-    }
-};
-
-template <>
-struct fmt::formatter<ast::GuardedPattern> : formatter<std::string> {
-    auto format(ast::GuardedPattern const& guarded, auto& ctx) const {
-        if (guarded.guard) {
-            return fmt::format_to(
-                ctx.out(), "guard({},{})", guarded.pattern,
-                guarded.guard.value()
-            );
-        }
-        return fmt::format_to(ctx.out(), "{}", guarded.pattern);
     }
 };
 
@@ -1001,19 +1016,11 @@ struct SpanPrinter {
     }
 
     void operator()(ast::Pattern const& pattern) {
-        std::visit(*this, pattern.value);
+        std::visit(*this, pattern.body.value);
     }
 
     void operator()(ast::Destructure const& pattern) {
         std::visit(*this, pattern.value);
-    }
-
-    void operator()(ast::GuardedPattern const& guarded) {
-        printSpan(guarded);
-        (*this)(guarded.pattern);
-        if (guarded.guard) {
-            (*this)(guarded.guard.value());
-        }
     }
 
     void operator()(ast::DestructureStruct const& structure) {
