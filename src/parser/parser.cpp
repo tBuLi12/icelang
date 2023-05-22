@@ -152,6 +152,8 @@ template <> constexpr String expected<Expression> = "an expression";
 template <> constexpr String expected<TupleFieldAccess> = "a number";
 template <> constexpr String expected<PropertyAccess> = "a property name";
 template <> constexpr String expected<Block> = "a block";
+template <> constexpr String expected<FunctionBody> = "{ or ->";
+template <> constexpr String expected<PrefixGuard> = "a guard";
 
 template <class L, class... ops>
 constexpr String expected<PrecedenceGroup<L, ops...>> = expected<L>;

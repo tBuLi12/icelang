@@ -100,6 +100,7 @@ template <String keyword> consteval auto operator""_kw() {
 struct PrefixExpression {};
 struct PrefixGuard {};
 struct PrefixScrutinee {};
+struct FunctionBody {};
 
 template <class T> constexpr bool ruleFor = false;
 
@@ -237,7 +238,8 @@ constexpr auto typeParameterList = optionOrDefault("<"_p + separatedWith<",">(ty
 RULE(Signature, signature) = "fun"_kw + ident +  typeParameterList + "("_p + separatedWith<",">(parameter) + ")"_p + option(":"_p + typeName);
 RULE(TypeDeclaration, typeDeclaration) = "type"_kw + ident + typeParameterList + typeName;
 RULE(TraitDeclaration, traitDeclaration) = "trait"_kw + ident + typeParameterList + "{"_p + list(signature) + "}"_p;
-RULE(FunctionDeclaration, functionDeclaration) = signature + as<Expression>(as<Expression>("->"_p + tupleExpression) | as<Expression>(block));
+RULE(FunctionBody, functionBody) = as<Expression>(as<Expression>("->"_p + tupleExpression) | as<Expression>(block));
+RULE(FunctionDeclaration, functionDeclaration) = signature + functionBody;
 RULE(TraitImplementation, traitImplementation) = "def"_kw + typeParameterList + typeName + "as"_kw + traitName + "{"_p + list(functionDeclaration) + "}"_p;
 
 // these rules are only used in the parsePostfixes function, but cannot be inlined because clang cries

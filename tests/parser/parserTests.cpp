@@ -1,22 +1,51 @@
 #include "../../src/parser/parse.h"
 #include <gtest/gtest.h>
+#include <ranges>
 #include <sstream>
 
-#define PARSE(name, sourceCode, expectedDump)                                                   \
-TEST(ParserTest, name) {                                                                        \
-    std::stringstream source{sourceCode};                                                       \
-    auto [program, log] = parseProgram(Source{source, ""});                                     \
-    EXPECT_EQ(fmt::format("{}", program), expectedDump);                                        \
-    EXPECT_TRUE(log.errorsAreEmpty());                                                          \
+#define PARSE(name, sourceCode, expectedDump)                                  \
+    TEST(ParserTest, name) {                                                   \
+        std::stringstream source{sourceCode};                                  \
+        auto [program, log] = parseProgram(Source{source, ""});                \
+        EXPECT_EQ(fmt::format("{}", program), expectedDump);                   \
+        EXPECT_TRUE(log.errorsAreEmpty());                                     \
+    }
+
+#define PARSE_FAIL(name, sourceCode, expectedDump, ...)                        \
+    TEST(ParserTest, name) {                                                   \
+        std::stringstream source{sourceCode};                                  \
+        auto [program, log] = parseProgram(Source{source, ""});                \
+        EXPECT_EQ(fmt::format("{}", program), expectedDump);                   \
+        EXPECT_TRUE(compareMessages(log.diagnostics, {__VA_ARGS__}));          \
+    }
+
+struct Message {
+    Span span;
+    std::string_view header;
+
+    Message(
+        size_t firstLine, size_t lastLine, size_t beginOffset,
+        size_t beginHighlightOffset, size_t endHighlightOffset,
+        std::string_view _header
+    )
+        : span{firstLine, lastLine, beginOffset, beginHighlightOffset, endHighlightOffset},
+          header{_header} {}
+};
+
+bool compareMessages(
+    std::vector<logs::SpannedMessage> const& logs,
+    std::initializer_list<Message> messages
+) {
+    return std::ranges::equal(
+        messages, logs,
+        [](Message const& message, logs::SpannedMessage const& log) {
+            std::cout << log.header << log.span << std::endl;
+            return message.span == log.span && message.header == log.header;
+        }
+    );
 }
 
-#define PARSE_FAIL(name, sourceCode, expectedDump)                                              \
-TEST(ParserTest, name) {                                                                        \
-    std::stringstream source{sourceCode};                                                       \
-    auto [program, log] = parseProgram(Source{source, ""});                                     \
-    EXPECT_EQ(fmt::format("{}", program), expectedDump);                                        \
-    EXPECT_FALSE(log.errorsAreEmpty());                                                         \
-}
+// clang-format off
 
 PARSE(Integer, "fun name() -> 3", "fun(name,,3)");
 PARSE(Variable, "fun name() -> someVar", "fun(name,,someVar)");
@@ -71,13 +100,54 @@ PARSE(GenericTrait, "trait Parse<T> { fun parse(): T }", "trait<T>(Parse,fun(par
 PARSE(TraitImplementation, "def Audi as Car { fun drive() { this.startEngine(); } }", "def(Audi,Car,fun(drive,,block(call(property(startEngine,this),),)))");
 PARSE(GenericImplementation, "def<T> [T] as Collection { fun length() -> this.length }", "def<T>(vector(T),Collection,fun(length,,property(length,this)))");
 
-PARSE_FAIL(NoFun, "name() -> 3", "");
-PARSE_FAIL(NoBody, "fun name() ->", "");
-PARSE_FAIL(NonBlockBody, "fun name() 3", "");
-PARSE_FAIL(MissingSemicolon, "fun name() { invoke() 7 }", "fun(name,,block(call(invoke,)))");
-PARSE_FAIL(MissingColon, "fun name() -> { prop: value, second value }", "fun(name,,struct(prop:value,second))");
-PARSE_FAIL(MissingParenthases, "fun name() -> if condition) 3 else 5", "fun(name,,if(condition,3,5))");
-PARSE_FAIL(MatchStruct, "fun name() -> match name { prop: value } { a => b }", "");
+PARSE(
+    GenericImplementation,
+    R"(
+        fun reverse<T>(vector: [T]): [T] {
+            var reversed = [];
+            while (let [..rest, last] = vector) {
+                reversed.push(last);
+                rest
+            };
+            reversed
+        }
+    )",
+    "def<T>(vector(T),Collection,fun(length,,property(length,this)))"
+);
+
+PARSE(
+    GenericImplementation,
+    R"(
+
+    )",
+    "def<T>(vector(T),Collection,fun(length,,property(length,this)))"
+);
+
+
+PARSE_FAIL(NoFun, "name() -> 3", "", Message(0, 0, 0, 0, 4, "expected a declaration"));
+PARSE_FAIL(NoBody, "fun name() ->", "", Message(0, 0, 0, 12, 13, "expected an expression"));
+PARSE_FAIL(NonBlockBody, "fun name() 3", "", Message(0, 0, 0, 11, 12, "expected { or ->"));
+PARSE_FAIL(MissingSemicolon, "fun name() { invoke() 7 }", "fun(name,,block(call(invoke,)))", Message(0, 0, 0, 22, 23, "expected ;"));
+PARSE_FAIL(MissingColon, "fun name() -> { prop: value, second value }", "fun(name,,struct(prop:value,second))", Message(0, 0, 0, 36, 41, "expected :"));
+PARSE_FAIL(MissingParenthases, "fun name() -> if condition) 3 else 5", "fun(name,,if(condition,3,5))", Message(0, 0, 0, 17, 26, "expected ("));
+PARSE_FAIL(MatchStruct, "fun name() -> match name { prop: value } { a => b }", "", Message(0, 0, 0, 31, 32, "expected =>"));
+PARSE_FAIL(StructBody, "fun name() { key: value }", "", Message(0, 0, 0, 16, 17, "expected }"));
+PARSE_FAIL(
+    BlockInGuard, 
+    R"(
+        fun name(user: User) {
+            match user {
+                { age == {
+                    let ages = [12, 13, 15];
+                    randomFrom(ages)
+                } } => accept(user),
+                _   => return,
+            }
+        }
+    )", 
+    "", 
+    Message(3, 3, 57, 25, 26, "expected a guard")
+);
 
 TEST(ParserTest, Spans) {
     std::stringstream source{
