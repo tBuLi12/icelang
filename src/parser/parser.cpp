@@ -171,7 +171,8 @@ template <class S, class T, bool b>
 constexpr String expected<SeparatedWith<S, T, b>> = expected<T>;
 
 template <class T, class R> constexpr String expected<As<T, R>> = expected<T>;
-template <class T, class M> constexpr String expected<SingleOrMultiple<M, T>> = expected<T>;
+template <class T, class M>
+constexpr String expected<SingleOrMultiple<M, T>> = expected<T>;
 
 template <class T, class... Ts>
 constexpr String expected<std::variant<T, Ts...>> =
@@ -551,7 +552,8 @@ class Parser : public logs::MessageLog {
 
         auto expression = parse(guard);
         if (expression) {
-            return Pattern{spanOf(expression.value()), std::move(expression.value()), {}};
+            return Pattern{
+                spanOf(expression.value()), std::move(expression.value()), {}};
         }
 
         return {};
@@ -666,53 +668,35 @@ class Parser : public logs::MessageLog {
         return Block{span, std::move(items), !hasTrailing};
     }
 
-    auto parseDeclaration() {
-        static constexpr auto declaration =
-            functionDeclaration | typeDeclaration | traitDeclaration |
-            traitImplementation | Rule<lexer::EndOfFile>{};
-        while (true) {
-            try {
-                if (auto parsed = parse(declaration)) {
-                    return std::move(parsed.value());
-                }
-            } catch (UnexpectedToken& error) {
-                logUnexpectedToken(error.expected);
-                continue;
-            }
-            logUnexpectedToken("a declaration");
-            nextToken();
-        }
-    }
-
     AST parseProgram() {
         AST program{};
 
-        bool endOfFileReached = false;
-        while (!endOfFileReached) {
-            std::visit(
-                match{
-                    [&](FunctionDeclaration&& declaration) {
-                        program.functions.push_back(std::move(declaration));
-                    },
-                    [&](TypeDeclaration&& declaration) {
-                        program.typeDeclarations.push_back(std::move(declaration
-                        ));
-                    },
-                    [&](TraitDeclaration&& declaration) {
-                        program.traitDeclarations.push_back(
-                            std::move(declaration)
-                        );
-                    },
-                    [&](TraitImplementation&& declaration) {
-                        program.traitImplementations.push_back(
-                            std::move(declaration)
-                        );
-                    },
-                    [&](lexer::EndOfFile&&) { endOfFileReached = true; },
-                },
-                parseDeclaration()
-            );
-        }
+        while (!parse(Rule<lexer::EndOfFile>{})) {
+            try {
+                if (auto function = parse(functionDeclaration)) {
+                    program.functions.push_back(std::move(*function));
+                    continue;
+                }
+                if (auto type = parse(typeDeclaration)) {
+                    program.typeDeclarations.push_back(std::move(*type));
+                    continue;
+                }
+                if (auto trait = parse(traitDeclaration)) {
+                    program.traitDeclarations.push_back(std::move(*trait));
+                    continue;
+                }
+                if (auto implementation = parse(traitImplementation)) {
+                    program.traitImplementations.push_back(
+                        std::move(*implementation)
+                    );
+                    continue;
+                }
+                logUnexpectedToken("a declaration");
+            } catch (UnexpectedToken& error) {
+                logUnexpectedToken(error.expected);
+            }
+            nextToken();
+        };
 
         return program;
     }
