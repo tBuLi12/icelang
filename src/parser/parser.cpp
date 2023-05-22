@@ -668,8 +668,8 @@ class Parser : public logs::MessageLog {
         return Block{span, std::move(items), !hasTrailing};
     }
 
-    AST parseProgram() {
-        AST program{};
+    Program parseProgram() {
+        Program program{};
 
         while (!parse(Rule<lexer::EndOfFile>{})) {
             try {
@@ -703,7 +703,7 @@ class Parser : public logs::MessageLog {
 };
 } // namespace parser
 
-std::pair<ast::AST, logs::MessageLog> parseProgram(Source source) {
+std::pair<ast::Program, logs::MessageLog> parseProgram(Source source) {
     parser::Parser parser{source};
     return {
         parser.parseProgram(),

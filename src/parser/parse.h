@@ -3,6 +3,6 @@
 
 #include "./ast.h"
 
-std::pair<ast::AST, logs::MessageLog> parseProgram(Source source);
+std::pair<ast::Program, logs::MessageLog> parseProgram(Source source);
 
 #endif

@@ -374,7 +374,7 @@ struct TraitImplementation {
     std::vector<FunctionDeclaration> implementations;
 };
 
-struct AST {
+struct Program {
     std::vector<TypeDeclaration> typeDeclarations;
     std::vector<TraitDeclaration> traitDeclarations;
     std::vector<TraitImplementation> traitImplementations;
@@ -976,8 +976,8 @@ struct fmt::formatter<ast::TypeDeclaration> : formatter<std::string> {
     }
 };
 
-template <> struct fmt::formatter<ast::AST> : formatter<std::string> {
-    auto format(ast::AST const& program, auto& ctx) const {
+template <> struct fmt::formatter<ast::Program> : formatter<std::string> {
+    auto format(ast::Program const& program, auto& ctx) const {
         return fmt::format_to(
             ctx.out(), "{}{}{}{}", fmt::join(program.functions, ","),
             fmt::join(program.traitDeclarations, ","),
@@ -1273,7 +1273,7 @@ struct SpanPrinter {
         (*this)(parameter.typeName);
     }
 
-    void operator()(ast::AST const& ast) {
+    void operator()(ast::Program const& ast) {
         std::ranges::for_each(ast.functions, *this);
         std::ranges::for_each(ast.typeDeclarations, *this);
         std::ranges::for_each(ast.traitDeclarations, *this);
