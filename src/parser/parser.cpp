@@ -28,6 +28,8 @@ template <class T> struct Spanned {
 
     using value_type = T;
 
+    bool operator==(Spanned const&) const = default;
+
     operator T&&() && {
         return std::move(value);
     }
@@ -441,6 +443,7 @@ class Parser : public logs::MessageLog {
                    // this is not a const context or sth
                    (parseRhs<TupleFieldAccess>(lhs, integer) ||
                     parseRhs<PropertyAccess>(lhs, propertyAccess) ||
+                    parseRhs<Match>(lhs, postfixMatch) ||
                     (expect<
                          std::variant<TupleFieldAccess, PropertyAccess>,
                          int /*whatever, not void*/>(),

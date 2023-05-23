@@ -1,14 +1,17 @@
-#include "../../src/parser/parse.h"
+#include "../../src/parser/parser.cpp"
 #include <gtest/gtest.h>
 #include <ranges>
 #include <sstream>
+
+using namespace parser;
 
 #define PARSE(name, sourceCode, expectedDump)                                  \
     TEST(ParserTest, name) {                                                   \
         std::stringstream source{sourceCode};                                  \
         auto [program, log] = parseProgram(Source{source, ""});                \
         EXPECT_EQ(fmt::format("{}", program), expectedDump);                   \
-        EXPECT_TRUE(log.errorsAreEmpty());                                     \
+        EXPECT_TRUE(log.errorsAreEmpty());                                   \
+        log.printDiagnosticsTo(std::cout);            \
     }
 
 #define PARSE_FAIL(name, sourceCode, expectedDump, ...)                        \
@@ -101,7 +104,7 @@ PARSE(TraitImplementation, "def Audi as Car { fun drive() { this.startEngine(); 
 PARSE(GenericImplementation, "def<T> [T] as Collection { fun length() -> this.length }", "def<T>(vector(T),Collection,fun(length,,property(length,this)))");
 
 PARSE(
-    GenericImplementation,
+    Reverse,
     R"(
         fun reverse<T>(vector: [T]): [T] {
             var reversed = [];
@@ -112,26 +115,47 @@ PARSE(
             reversed
         }
     )",
-    "def<T>(vector(T),Collection,fun(length,,property(length,this)))"
+    "fun<T>(reverse:vector(T),vector:vector(T),block(var(reversed,vector()),while(let(p-vector(..rest,last),vector),block(call(property(push,reversed),last),rest)),reversed))"
 );
 
 PARSE(
-    GenericImplementation,
+    GenericSum,
     R"(
-
+        fun sum<T is Add<T>>(items: [T]): T {
+            if (let [first, ..toSum] = items) {
+                while(let total, [next, ..rest] = first, toSum) (sum + next, rest)
+            }.0 else {
+                panic("cannot sum an empty list")
+            }
+        }
     )",
-    "def<T>(vector(T),Collection,fun(length,,property(length,this)))"
+    "fun<T:(Add<T>)>(sum:T,items:vector(T),block(if(let(p-vector(first,..toSum),items),field(0,block(while(let(p-tuple(total,p-vector(next,..rest)),tuple(first,toSum)),tuple(+(sum,next),rest)))),block(call(panic,\"cannot sum an empty list\")))))"
+);
+
+PARSE(
+    CompareVectors,
+    R"(
+        fun compare<R, L is Equals<R>>(left: [L], right: [R]): bool {
+            {
+                while (let [x, ..leftRest], [x, ..rightRest] = left, right) (leftRest, rightRest)
+            }.match {
+                [], [] => true,
+                _ => false,
+            }
+        }
+    )",
+    "fun<R,L:(Equals<R>)>(compare:bool,left:vector(L),right:vector(R),block(match(block(while(let(p-tuple(p-vector(x,..leftRest),p-vector(x,..rightRest)),tuple(left,right)),tuple(leftRest,rightRest))),p-tuple(p-vector(),p-vector())=>true,_=>false)))"
 );
 
 
 PARSE_FAIL(NoFun, "name() -> 3", "", Message(0, 0, 0, 0, 4, "expected a declaration"));
 PARSE_FAIL(NoBody, "fun name() ->", "", Message(0, 0, 0, 12, 13, "expected an expression"));
 PARSE_FAIL(NonBlockBody, "fun name() 3", "", Message(0, 0, 0, 11, 12, "expected { or ->"));
-PARSE_FAIL(MissingSemicolon, "fun name() { invoke() 7 }", "fun(name,,block(call(invoke,)))", Message(0, 0, 0, 22, 23, "expected ;"));
-PARSE_FAIL(MissingColon, "fun name() -> { prop: value, second value }", "fun(name,,struct(prop:value,second))", Message(0, 0, 0, 36, 41, "expected :"));
+PARSE_FAIL(MissingSemicolon, "fun name() { invoke() 7 }", "fun(name,,block(call(invoke,)))", Message(0, 0, 0, 22, 23, "expected }"));
+PARSE_FAIL(MissingColon, "fun name() -> { prop: value, second value }", "fun(name,,struct(prop:value,second))", Message(0, 0, 0, 36, 41, "expected }"));
 PARSE_FAIL(MissingParenthases, "fun name() -> if condition) 3 else 5", "fun(name,,if(condition,3,5))", Message(0, 0, 0, 17, 26, "expected ("));
 PARSE_FAIL(MatchStruct, "fun name() -> match name { prop: value } { a => b }", "", Message(0, 0, 0, 31, 32, "expected =>"));
-PARSE_FAIL(StructBody, "fun name() { key: value }", "", Message(0, 0, 0, 16, 17, "expected }"));
+PARSE_FAIL(StructBody, "fun name() { key: value }", "fun(name,,block(key))", Message(0, 0, 0, 16, 17, "expected }"));
 PARSE_FAIL(
     BlockInGuard, 
     R"(
@@ -147,6 +171,17 @@ PARSE_FAIL(
     )", 
     "", 
     Message(3, 3, 57, 25, 26, "expected a guard")
+);
+PARSE_FAIL(
+    ControlFlowOutsideBlock, 
+    R"(
+        fun getCount(): int {
+            let count = 0;
+            2 + return 4;
+        }
+    )", 
+    "", 
+    Message(3, 3, 58, 16, 22, "expected an expression")
 );
 
 TEST(ParserTest, Spans) {
@@ -203,4 +238,69 @@ TEST(ParserTest, Spans) {
     auto& firstProp = pattern.properties.at(0);
     EXPECT_EQ(std::get<ast::Binary<"==">>(firstProp.property.value).span, (Span{16, 16, 453, 22, 31}));
     EXPECT_EQ(arm.span, (Span{16, 16, 453, 44, 72}));
+}
+
+TEST(ParserTest, OrLambdaFolds) {
+    
+    auto folded = std::optional<std::variant<int, double>>{}
+                || [] { return std::optional<double>{}; }
+                || [] { return std::optional{3}; }
+                || [] { return std::optional{0.7}; }
+                || [] () -> std::optional<int> { throw ""; };
+    EXPECT_EQ(folded, (std::optional<std::variant<int, double>>{3}));
+}
+
+TEST(ParserTest, AndLambdaFolds) {
+    auto folded = std::optional{Spanned{Span{0, 0, 0, 1, 2}, std::tuple{3}}}
+                && [] { return std::optional{Spanned{Span{0, 0, 0, 5, 7}, 0.3}}; }
+                && [] { return std::optional{Spanned{Span{0, 0, 0, 8, 9}, 5}}; }
+                && [] { return std::optional{Spanned{Span{0, 0, 0, 11, 14}, 0.9}}; };
+    
+    EXPECT_EQ(folded, (std::optional{Spanned{Span{0, 0, 0, 1, 14}, std::tuple{3, 0.3, 5, 0.9}}}));
+}
+
+TEST(ParserTest, AndLambdaFoldsFail) {
+    auto folded = std::optional{Spanned{Span{}, std::tuple{3}}}
+                && [] { return std::optional{Spanned{Span{}, 0.3}}; }
+                && [] { return std::optional<Spanned<int>>{}; }
+                && [] { return std::optional{Spanned{Span{}, 0.9}}; };
+    
+    EXPECT_EQ(folded, (std::optional<Spanned<std::tuple<int, double, int, double>>>{}));
+}
+
+TEST(ParserTest, ConcatResult) {
+    auto result = concatResult(Spanned{Span{0, 0, 0, 1, 3}, std::tuple{1, 1.1}}, Spanned{Span{0, 0, 0, 5, 7}, 7});
+    EXPECT_EQ(result, (Spanned{Span{0, 0, 0, 1, 7}, std::tuple{1, 1.1, 7}}));
+}
+
+TEST(ParserTest, ConcatResultKeyword) {
+    auto result = concatResult(Spanned{Span{0, 0, 0, 1, 3}, std::tuple{1, 1.1}}, lexer::Keyword<"fun">{Span{1, 1, 4, 2, 5}});
+    EXPECT_EQ(result, (Spanned{Span{0, 1, 0, 1, 5}, std::tuple{1, 1.1}}));
+}
+
+TEST(ParserTest, SpanOfToken) {
+    lexer::Keyword<"fun"> keyword{Span{1, 1, 4, 2, 5}};
+    EXPECT_EQ(spanOf(keyword), (Span{1, 1, 4, 2, 5}));
+}
+
+TEST(ParserTest, SpanOfSpanned) {
+    Spanned spanned{Span{1, 1, 4, 6, 8}, 0};
+    EXPECT_EQ(spanOf(spanned), (Span{1, 1, 4, 6, 8}));
+}
+
+TEST(ParserTest, MakeWithTuple) {
+    Span span = make<Span>(static_cast<size_t>(0), std::tuple<size_t, size_t, size_t>{0, 1, 4}, static_cast<size_t>(8));
+    EXPECT_EQ(span, (Span{0, 0, 1, 4, 8}));
+}
+
+TEST(ParserTest, MakeUpcastVariant) {
+    auto result = make<std::variant<int, float, double>>(std::variant<double, int>{4});
+    EXPECT_EQ(result, (std::variant<int, float, double>{4}));
+}
+
+TEST(ParserTest, MakeChooseContructor) {
+    auto fromChar = make<std::string>(std::variant<std::string, char>{'o'});
+    auto fromString = make<std::string>(std::variant<std::string, char>{"123"});
+    EXPECT_EQ(fromChar, "o");
+    EXPECT_EQ(fromString, "123");
 }

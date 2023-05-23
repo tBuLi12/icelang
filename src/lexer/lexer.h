@@ -281,7 +281,7 @@ template <String... punctuations> struct WithPunctuations {
 
         std::string getNextWord() {
             std::string word{};
-            while (std::isalnum(currentCharacter())) {
+            while (std::isalnum(currentCharacter()) || currentCharacter() == '_') {
                 word.push_back(getNextCharacter());
             }
 
@@ -289,7 +289,7 @@ template <String... punctuations> struct WithPunctuations {
         }
 
         std::optional<Token> tryParseKeywordOrIdentifier() {
-            if (!std::isalpha(currentCharacter())) {
+            if (!std::isalpha(currentCharacter()) && currentCharacter() != '_') {
                 return {};
             }
 

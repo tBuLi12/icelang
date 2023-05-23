@@ -44,7 +44,6 @@ add_executable(
 add_executable(
   parserTests
   ${PROJECT_SOURCE_DIR}/tests/parser/parserTests.cpp
-  ${PROJECT_SOURCE_DIR}/src/parser/parser.cpp
   ${PROJECT_SOURCE_DIR}/src/parser/ast.cpp
   ${PROJECT_SOURCE_DIR}/src/logs/logs.cpp
 )

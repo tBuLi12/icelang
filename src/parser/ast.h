@@ -889,7 +889,7 @@ template <> struct fmt::formatter<ast::TypeParameter> : formatter<std::string> {
     auto format(ast::TypeParameter const& parameter, auto& ctx) const {
         if (parameter.traitBounds.size() > 0) {
             return fmt::format_to(
-                ctx.out(), "{}:()", parameter.name,
+                ctx.out(), "{}:({})", parameter.name,
                 fmt::join(parameter.traitBounds, "&")
             );
         }

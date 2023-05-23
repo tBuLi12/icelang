@@ -146,13 +146,14 @@ RULE(PrefixScrutinee, scrutineePrefix) = as<Expression>(
 );
 
 constexpr auto scrutinee = as<Expression>(createPrecedenceHierarchy(scrutineePrefix));
+constexpr auto openPattern = singleOrMultipleAs<DestructureTuple>(pattern);
 
 RULE(MatchArm, matchArm)    = as<Break>("break"_kw + option(expression)) 
                             | as<Return>("return"_kw + option(expression)) 
                             | as<Continue>("continue"_kw + option(expression)) 
                             | expression;
 
-RULE(MatchCase, matchCase) = pattern + "=>"_p + matchArm;
+RULE(MatchCase, matchCase) = openPattern + "=>"_p + matchArm;
 RULE(Match, _match) = "match"_kw + scrutinee + "{"_p + separatedWith<",">(matchCase) + "}"_p;
 
 constexpr auto primaryGuard = as<Expression>(
@@ -176,7 +177,6 @@ constexpr auto orExpression = createPrecedenceHierarchy(prefixExpression);
 constexpr auto guard = createPrecedenceHierarchy(prefixGuard);
 
 constexpr auto tupleExpression = as<Expression>(singleOrMultipleAs<TupleLiteral>(expression));
-constexpr auto openPattern = singleOrMultipleAs<DestructureTuple>(pattern);
 
 RULE(PropertyDeclaration, propertyDeclaration) = ident + ":"_p + typeName;
 RULE(NamedType, namedType) = ident + optionOrDefault("<"_p + separatedWith<",">(typeName) + ">"_p);
@@ -249,6 +249,7 @@ constexpr auto call =
     optionOrDefault(":<"_p + separatedWith<",">(typeName) + ">"_p) + "("_p +
     separatedWith<",">(expression) + ")"_p;
 constexpr auto propertyAccess = option("<"_p + traitName + ">"_p) + ident;
+constexpr auto postfixMatch = "match"_kw + "{"_p + separatedWith<",">(matchCase) + "}"_p;
 
 // clang-format on
 
