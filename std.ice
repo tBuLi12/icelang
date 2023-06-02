@@ -1,3 +1,7 @@
+import "other" as other
+import "third" as third
+import "test:name" as tstd
+
 trait Add<T> {
     fun add(other: T): T
 }
@@ -33,7 +37,16 @@ type Vector<T> {
 @extern fun rtCopy(size: int, buf: @ptr int): @ptr int {}
 @extern fun rtFree(buf: @ptr int) {}
 @extern fun rtSlice(buf: @ptr int, offset: int, len: int) {}
+@extern fun rtMove(offset: int, buf: @ptr int, src: @ptr int, len: int) {}
 @extern fun dbgPrint(): int {}
+
+fun createVector<T>(size: int) {
+    Vector:<T> {
+        buffer: rtAlloc(T.size * size),
+        capacity: size,
+        length: size,
+    };
+}
 
 fun createVector<T>(size: int): Vector<T> {
     Vector:<T> {
@@ -42,8 +55,8 @@ fun createVector<T>(size: int): Vector<T> {
         length: size,
     }
 }
-
 fun push<T>(vector: Vector<T>, item: T): Vector<T> {
+    T.size;
     var vec = vector;
     if (vec.length == vec.capacity) {
         vec.buffer = rtRealloc(vec.buffer, T.size * vec.capacity);
@@ -54,21 +67,27 @@ fun push<T>(vector: Vector<T>, item: T): Vector<T> {
     vec
 }
 
-fun main(): int {
-    // let x = ;
-    match ([1, 1, 0, 3],1 ) {
-        ([a, b, ..rest, c], 0) => rest[0],
-        // [a, b, ..] => 0,
-        vc => 0,
-    }
-
-    x.while (let [a, ..b]) b;
-
-    // let y = x;
-    // 0
+trait Test {
+    fun num(): int
 }
 
+type TestT {
+    val : int
+}
 
+def TestT {
+    fun num(): int -> this.val
+}
+
+def<T> [T] {
+    fun last(): T -> this[0]
+}
+
+fun main(): int {
+    let a = [1, 2, 3];
+    
+    other::fl::pull()
+}
 
 trait Copy {
     fun copy(): This
@@ -86,16 +105,16 @@ def<T> [T] as Drop {
 
 def<T> [T] as Copy {
     fun copy(): This {
-        var new = Vector:<T> {
-            buffer: rtCopy(this.length * T.size, this.buffer),
+        var new = This {
+            buffer: rtAlloc(this.length * T.size),
             length: this.length,
             capacity: this.length,
         };
-        // var i = 0;
-        // while (i != this.length) {
-        //     new[i] = this[i];
-        //     i = i + 1;
-        // };
+        var i = 0;
+        while (i != this.length) {
+            new[i] = this[i];
+            i = i + 1;
+        };
         new
     }
 }

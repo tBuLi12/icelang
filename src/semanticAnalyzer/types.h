@@ -23,6 +23,7 @@ struct TypeDeclaration;
 struct TraitDeclaration;
 struct FunctionDeclaration;
 struct TraitImplementation;
+struct Implementation;
 } // namespace ast
 
 struct Trait {
@@ -38,13 +39,13 @@ struct Function {
     std::vector<Type> typeArguments;
 };
 
-struct TraitBoundRef {
-    bool isBlockBound;
-    size_t index;
+struct TraitImplRef {
+    ast::TraitImplementation* declaration;
+    std::vector<Type> typeArguments;
 };
 
 struct ImplRef {
-    ast::TraitImplementation* declaration;
+    ast::Implementation* declaration;
     std::vector<Type> typeArguments;
 };
 
@@ -155,7 +156,6 @@ std::vector<std::pair<Type, Trait>> with(
 );
 
 struct TraitMethodRef {
-    Type thisType;
     Trait trait;
     std::vector<Type> typeArguments;
 };

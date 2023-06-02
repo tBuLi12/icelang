@@ -36,92 +36,6 @@ struct TypeMonomorph {
     llvm::Type* asLLVM;
 };
 
-struct ImplScope : std::vector<ast::TraitImplementation*> {
-    std::optional<ImplRef> tryFind(Type const& type, Trait const& trait) {
-        for (auto implementation : *this) {
-            // std::cout << "trying codegen "
-            //           << implementation->trait.declaration->name.value
-            //           << std::endl;
-            // std::cout << "trying codegen " << implementation->type <<
-            // std::endl; std::cout << "trying codegen " <<
-            // trait.declaration->name.value
-            //           << std::endl;
-            // std::cout << "trying codegen " << type << std::endl;
-
-            if (auto found = matches(*implementation, trait, type)) {
-                std::cout << "impl found" << type << std::endl;
-                return {{implementation, std::move(found.value())}};
-            }
-        }
-        return {};
-    }
-
-    ImplRef find(Type const& type, Trait const& trait) {
-        auto impl = tryFind(type, trait);
-        if (impl) {
-            return std::move(impl.value());
-        }
-
-        std::cout << "FATAL: impl not found" << std::endl;
-        throw "impl not found";
-    }
-
-    bool areSatisfied(std::vector<std::pair<Type, Trait>> const& traitBounds) {
-        for (auto& [type, trait] : traitBounds) {
-            bool found = false;
-            for (auto implementation : *this) {
-                if ((found =
-                         matches(*implementation, trait, type).has_value())) {
-                    break;
-                }
-            }
-            if (!found) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    std::optional<std::vector<Type>> matches(
-        ast::TraitImplementation const& implemetation, Trait const& trait,
-        Type const& type
-    ) {
-        std::cout << "impl found1" << type << " "
-                  << trait.declaration->name.value << std::endl;
-        if (implemetation.trait.declaration != trait.declaration) {
-            return {};
-        }
-
-        std::vector<Type> inferredTypeArguments{};
-        inferredTypeArguments.resize(implemetation.typeParameterNames.size());
-
-        std::cout << "impl found2" << type << " cnt "
-                  << implemetation.trait.typeArguments.size() << std::endl;
-        for (size_t i = 0; i < implemetation.trait.typeArguments.size(); ++i) {
-            if (!tryMatch(
-                    inferredTypeArguments, implemetation.trait.typeArguments[i],
-                    trait.typeArguments[i]
-                )) {
-                return {};
-            }
-        }
-
-        std::cout << "impl found3" << type << std::endl;
-        if (!tryMatch(inferredTypeArguments, implemetation.type, type)) {
-            return {};
-        }
-
-        std::cout << "impl found4" << type << std::endl;
-        return areSatisfied(
-                   with(inferredTypeArguments, {}, implemetation.traitBounds)
-               )
-                   ? std::optional<std::vector<Type>>{std::move(
-                         inferredTypeArguments
-                     )}
-                   : std::optional<std::vector<Type>>{};
-    }
-};
-
 struct Temp {
     size_t index;
 };
@@ -163,7 +77,7 @@ struct IRVisitor {
     std::unique_ptr<llvm::IRBuilder<>> builder;
     std::unique_ptr<llvm::Module> currentModule;
     std::unordered_map<std::string, type::BuiltIn*>& builtInTypes;
-    ImplScope implScope;
+    ImplementationScope implScope;
 
     std::vector<Type> const* typeArguments;
     std::vector<Type> const* blockTypeArguments;
@@ -174,6 +88,7 @@ struct IRVisitor {
     std::unordered_map<std::string, FunctionMonomorph*> functions{};
 
     Function allocFunc;
+    Function moveFunc;
     Function freeFunc;
     Function sliceFunc;
 
@@ -184,6 +99,32 @@ struct IRVisitor {
 
     std::vector<Value> temporaryCleanup{};
     std::vector<ast::Binding> cleanupStack{};
+
+    std::vector<Module*>* modules;
+
+    std::string findOwner(ast::FunctionDeclaration* declaration) {
+        for (auto& mod : *modules) {
+            auto ptr = mod->program.functions.data();
+            if (ptr <= declaration &&
+                declaration < (ptr + mod->program.functions.size())) {
+                return mod->moduleId;
+            }
+        }
+        std::cout << "no owner" << std::endl;
+        throw "";
+    }
+
+    std::string findOwner(ast::TypeDeclaration* declaration) {
+        for (auto& mod : *modules) {
+            auto ptr = mod->program.typeDeclarations.data();
+            if (ptr <= declaration &&
+                declaration < (ptr + mod->program.typeDeclarations.size())) {
+                return mod->moduleId;
+            }
+        }
+        std::cout << "no owner" << std::endl;
+        throw "";
+    }
 
     void append(llvm::BasicBlock* block) {
         auto function = builder->GetInsertBlock()->getParent();
@@ -280,6 +221,15 @@ struct IRVisitor {
         }
     };
 
+    struct LoopContext {
+        Lifetime lifetime;
+        llvm::BasicBlock* begin;
+        llvm::BasicBlock* end;
+        std::vector<std::pair<llvm::BasicBlock*, llvm::Value*>>* breaks;
+    };
+
+    LoopContext* loopCtx;
+
     bool isNever(Value value) {
         return !value.asLLVM;
     }
@@ -344,19 +294,32 @@ struct IRVisitor {
         return null();
     }
 
-    Value operator()(ast::Break&&) {
-        fmt::println("unsupported");
-        throw "";
+    Value operator()(ast::Break&& _break) {
+        if (loopCtx->breaks) {
+            loopCtx->breaks->push_back(
+                {builder->GetInsertBlock(), (*this)(*_break.value)}
+            );
+        }
+        loopCtx->lifetime.end();
+        builder->CreateBr(loopCtx->end);
+        return never;
     }
 
-    Value operator()(ast::Return&&) {
-        fmt::println("unsupported");
-        throw "";
+    Value operator()(ast::Return&& _return) {
+        Value value = _return.value ? (*this)(*_return.value) : null();
+        builder->CreateRet(value);
+        return never;
     }
 
-    Value operator()(ast::Continue&&) {
-        fmt::println("unsupported");
-        throw "";
+    Value operator()(ast::Continue&& _continue) {
+        if (loopCtx->breaks) {
+            loopCtx->breaks->push_back(
+                {builder->GetInsertBlock(), (*this)(*_continue.value)}
+            );
+        }
+        loopCtx->lifetime.end();
+        builder->CreateBr(loopCtx->begin);
+        return never;
     }
 
     Value operator()(lexer::StringLiteral&&) {
@@ -364,16 +327,8 @@ struct IRVisitor {
         throw "";
     }
 
-    Value operator()(ast::IndexAccess&& access) {
-        fmt::println("into index access");
-        auto lhs = (*this)(*access.lhs);
-        auto index = (*this)(*access.index);
-        if (isNever(lhs) || isNever(index))
-            return never;
-
-        llvm::Type* elementType = asLLVM(access.elementType);
-
-        llvm::Value* vecLen = builder->CreateExtractValue(lhs, {0, 2});
+    llvm::Value* indexVector(Value vector, Value index, Span accessSpan) {
+        llvm::Value* vecLen = builder->CreateExtractValue(vector, {0, 2});
         auto isOutOfBounds = builder->CreateICmpSGE(index, vecLen);
 
         auto outOfBounds = createBlock("outofbounds");
@@ -382,7 +337,7 @@ struct IRVisitor {
         builder->CreateCondBr(isOutOfBounds, outOfBounds, inBounds);
         appendAndSetInsertTo(outOfBounds);
         std::stringstream error{};
-        logs::SpannedMessage msg{source, access.span, "", ""};
+        logs::SpannedMessage msg{source, accessSpan, "", ""};
         std::cout << msg << std::endl;
         msg.printBodyTo(error);
         auto errorMessage =
@@ -391,10 +346,26 @@ struct IRVisitor {
         builder->CreateBr(inBounds);
 
         appendAndSetInsertTo(inBounds);
-        llvm::Value* bufPtr = builder->CreateExtractValue(lhs, {0, 0});
-        llvm::Value* elementPtr =
-            builder->CreateInBoundsGEP(elementType, bufPtr, {index});
+        llvm::Value* bufPtr = builder->CreateExtractValue(vector, {0, 0});
+        std::cout << std::get<type::Named>(vector.type).declaration
+                  << std::endl;
+        auto elemType =
+            asLLVM(std::get<type::Named>(vector.type).typeArguments[0]);
+        std::cout << "uuu" << std::endl;
+        return builder->CreateInBoundsGEP(elemType, bufPtr, {index});
+    }
 
+    Value operator()(ast::IndexAccess&& access) {
+        fmt::println("into index access");
+        auto lhs = (*this)(*access.lhs);
+        std::cout << lhs.type << std::endl;
+        auto index = (*this)(*access.index);
+        if (isNever(lhs) || isNever(index))
+            return never;
+
+        llvm::Type* elementType = asLLVM(access.elementType);
+        auto elementPtr = indexVector(lhs, index, access.span);
+        fmt::println("into3 index access");
         llvm::Value* value = builder->CreateLoad(elementType, elementPtr);
 
         if (lhs.owner.index() == 0) {
@@ -407,29 +378,61 @@ struct IRVisitor {
 
     Value operator()(ast::VectorLiteral&& vector) {
         auto elements = std::get_if<ast::VectorElements>(&vector.content);
-        size_t capacity = elements ? elements->elements.size() : 0;
+        size_t nOfElems = elements ? elements->elements.size() : 0;
         llvm::Type* elemType = asLLVM(vector.elementType);
-        llvm::Value* cap = getInt(
-            32,
-            capacity * currentModule->getDataLayout().getTypeAllocSize(elemType)
-        );
-        llvm::Value* ptr =
-            builder->CreateCall(functions["rtAlloc"]->asLLVM, {cap});
 
-        for (size_t i = 0; i < capacity; ++i) {
-            llvm::Value* element =
-                builder->CreateInBoundsGEP(elemType, ptr, {getInt(32, i)});
-            auto value = (*this)(std::move(elements->elements[i]));
-            builder->CreateStore(copy(value), element);
+        std::vector<Value> values{};
+        for (size_t i = 0; i < nOfElems; ++i) {
+            values.push_back((*this)(std::move(elements->elements[i])));
         }
+
+        llvm::Value* elementSize = getInt(
+            32, currentModule->getDataLayout().getTypeAllocSize(elemType)
+        );
+        std::vector<llvm::Value*> lengths{getInt(32, 0)};
+        for (size_t i = 0; i < nOfElems; ++i) {
+            if (auto spread =
+                    std::get_if<ast::Spread>(&elements->elements[i].value)) {
+                lengths.push_back(builder->CreateAdd(
+                    lengths.back(), extract(values[i], {0, 2})
+                ));
+            } else {
+                lengths.push_back(
+                    builder->CreateAdd(lengths.back(), getInt(32, 1))
+                );
+            }
+        }
+
+        auto byteCap = builder->CreateMul(lengths.back(), elementSize);
+        llvm::Value* ptr =
+            builder->CreateCall(functions["rtAlloc"]->asLLVM, {byteCap});
+
+        for (size_t i = 0; i < nOfElems; ++i) {
+            if (auto spread =
+                    std::get_if<ast::Spread>(&elements->elements[i].value)) {
+                Value owned = copy(values[i]);
+                auto offset = builder->CreateMul(lengths[i], elementSize);
+                auto movedSize =
+                    builder->CreateMul(extract(values[i], {0, 2}), elementSize);
+                builder->CreateCall(
+                    functions.at("rtMove")->asLLVM,
+                    {offset, ptr, extract(owned, {0, 0}), movedSize}
+                );
+                drop(owned);
+            } else {
+                llvm::Value* element =
+                    builder->CreateInBoundsGEP(elemType, ptr, {lengths[i]});
+                builder->CreateStore(copy(values[i]), element);
+            }
+            fmt::println("will aaa {}", nOfElems);
+        }
+
         llvm::Value* literal = llvm::UndefValue::get(asLLVM(type::Named{
             vecDeclaration, {Type{vector.elementType}}}));
 
-        cap = getInt(32, static_cast<unsigned int>(capacity));
-
         literal = builder->CreateInsertValue(literal, ptr, {0, 0});
-        literal = builder->CreateInsertValue(literal, cap, {0, 1});
-        literal = builder->CreateInsertValue(literal, cap, {0, 2});
+        literal = builder->CreateInsertValue(literal, lengths.back(), {0, 1});
+        literal = builder->CreateInsertValue(literal, lengths.back(), {0, 2});
         fmt::println("will print type");
         std::cout << vector.type << std::endl;
         auto val = Value{literal, {}, vector.type};
@@ -442,8 +445,7 @@ struct IRVisitor {
     }
 
     Value operator()(ast::Spread&& spread) {
-        fmt::println("unsupported");
-        throw "no";
+        return (*this)(spread.value);
     }
 
     Value operator()(ast::Expression&& expression) {
@@ -531,11 +533,9 @@ struct IRVisitor {
         ast::IndexAccess&& access, std::vector<llvm::Value*>& indices
     ) {
         Value vec = (*this)(std::move(*access.lhs));
-        llvm::Type* elemType = asLLVM(access.elementType);
-        vec.asLLVM = builder->CreateExtractValue(vec, {0, 0});
-        vec.asLLVM =
-            builder->CreateInBoundsGEP(elemType, vec, {(*this)(*access.index)});
-        return vec;
+        return {
+            indexVector(vec, (*this)(*access.index), access.span), vec.owner,
+            access.elementType};
     }
 
     Value getVarPointer(
@@ -622,7 +622,8 @@ struct IRVisitor {
             if (trueVal.owner.index() == 0)
                 drop(trueVal);
         }
-        builder->CreateBr(afterBlock);
+        if (!isNever(trueVal))
+            builder->CreateBr(afterBlock);
         ifBlock = builder->GetInsertBlock();
         fmt::println("into if 2");
 
@@ -643,7 +644,8 @@ struct IRVisitor {
                     drop(falseVal);
             }
 
-            builder->CreateBr(afterBlock);
+            if (!isNever(falseVal))
+                builder->CreateBr(afterBlock);
             elseBlock = builder->GetInsertBlock();
         }
 
@@ -676,24 +678,64 @@ struct IRVisitor {
         auto loopBlock = createBlock("loopbody");
         auto afterBlock = createBlock("afterwhile");
 
+        {
+            LoopContext loopContext{
+                beginLifetime(),
+                conditionBlock,
+                afterBlock,
+            };
+            loopCtx = &loopContext;
+
+            builder->CreateBr(conditionBlock);
+            appendAndSetInsertTo(conditionBlock);
+            if (std::visit(
+                    match{
+                        [&](ast::Expression& expression) {
+                            Value condval = (*this)(std::move(expression));
+                            if (isNever(condval))
+                                return true;
+
+                            builder->CreateCondBr(
+                                condval, loopBlock, afterBlock
+                            );
+                            return false;
+                        },
+                        [&](ast::LetBinding& binding) {
+                            auto initialValue = (*this)(binding.initalValue);
+                            if (isNever(initialValue))
+                                return true;
+                            BindPattern{
+                                *this, afterBlock, &loopContext.lifetime}(
+                                binding.binding, (*this)(binding.initalValue)
+                            );
+                            builder->CreateBr(loopBlock);
+                            return false;
+                        },
+                        [&](ast::VarBinding& binding) {
+                            auto initialValue = (*this)(binding.initalValue);
+                            if (isNever(initialValue))
+                                return true;
+                            BindPattern{
+                                *this, afterBlock, &loopContext.lifetime}(
+                                binding.binding, (*this)(binding.initalValue)
+                            );
+                            builder->CreateBr(loopBlock);
+                            return false;
+                        },
+                    },
+                    loop.condition->value
+                )) {
+                return never;
+            }
+
+            appendAndSetInsertTo(loopBlock);
+            auto bodyValue = (*this)(*loop.body);
+            if (bodyValue.owner.index() == 0)
+                drop(bodyValue);
+            loopBlock = builder->GetInsertBlock();
+        }
+
         builder->CreateBr(conditionBlock);
-        appendAndSetInsertTo(conditionBlock);
-        Value condval = (*this)(std::move(*loop.condition));
-        if (isNever(condval))
-            return never;
-
-        fmt::println("after valgen");
-
-        builder->CreateCondBr(condval, loopBlock, afterBlock);
-        fmt::println("after cond");
-
-        appendAndSetInsertTo(loopBlock);
-        auto bodyValue = (*this)(*loop.body);
-        if (bodyValue.owner.index() == 0)
-            drop(bodyValue);
-        loopBlock = builder->GetInsertBlock();
-        builder->CreateBr(conditionBlock);
-
         appendAndSetInsertTo(afterBlock);
 
         fmt::println("while done");
@@ -720,9 +762,22 @@ struct IRVisitor {
         return {val, {}, typeExpression.type};
     }
 
+    static void printllvm(llvm::StringRef str) {
+        for (auto chr : str) {
+            std::cout << chr;
+        }
+        std::cout << std::endl;
+    }
+
     Value operator()(ast::Variable&& variable) {
         if (variable.binding <
             builder->GetInsertBlock()->getParent()->arg_size()) {
+            for (auto& arg : builder->GetInsertBlock()->getParent()->args()) {
+                printllvm(arg.getName());
+            }
+            std::cout << builder->GetInsertBlock()->getParent()->arg_size()
+                      << " generating value from param " << variable.binding
+                      << " " << variable.name << std::endl;
             return {
                 cleanupStack[variable.binding].value, variable.binding,
                 cleanupStack[variable.binding].type};
@@ -839,27 +894,42 @@ struct IRVisitor {
             structure.type};
     }
 
-    FunctionMonomorph* createSignature(Function const& function) {
-        auto monomorphName = nameOf(function.typeArguments);
+    FunctionMonomorph* createSignature(
+        Function const& function, std::string_view name,
+        std::optional<Type> thisType = {},
+        std::vector<Type> const& blockTArgs = {}
+    ) {
         std::vector<llvm::Type*> llvmParamTypes{};
+        if (thisType) {
+            llvmParamTypes.push_back(asLLVM(*thisType));
+        }
         for (auto& arg : function.declaration->parameters) {
             llvmParamTypes.push_back(
-                asLLVM(with({}, function.typeArguments, arg.type))
+                asLLVM(with(blockTArgs, function.typeArguments, arg.type))
             );
         }
-        auto resolved =
-            with({}, function.typeArguments, function.declaration->returnType);
+        auto resolved = with(
+            blockTArgs, function.typeArguments, function.declaration->returnType
+        );
         auto returnTypeAsLLVM = asLLVM(resolved);
         auto funcType =
             llvm::FunctionType::get(returnTypeAsLLVM, llvmParamTypes, false);
         auto llvmFunc = llvm::Function::Create(
-            funcType, llvm::Function::ExternalLinkage,
-            function.declaration->name.value + monomorphName,
-            currentModule.get()
+            funcType, llvm::Function::ExternalLinkage, name, currentModule.get()
         );
         size_t i = 0;
         for (auto& arg : llvmFunc->args()) {
-            arg.setName(function.declaration->parameters[i].name.value);
+            if (thisType) {
+                if (i == 0) {
+                    arg.setName("this");
+                } else {
+                    arg.setName(
+                        function.declaration->parameters[i - 1].name.value
+                    );
+                }
+            } else {
+                arg.setName(function.declaration->parameters[i].name.value);
+            }
             ++i;
         }
 
@@ -867,63 +937,36 @@ struct IRVisitor {
             llvmFunc,
             function.declaration,
             with(*blockTypeArguments, *typeArguments, function.typeArguments),
+            with(*blockTypeArguments, *this->typeArguments, blockTArgs),
+            thisType,
         };
         return func;
     }
 
     llvm::Value* callTraitMethod(
-        Value thisValue, size_t methodIdx, TraitMethodRef const& method,
-        ImplRef const& impl, std::vector<Value>& args
+        Value thisValue, size_t methodIdx,
+        std::vector<Type> const& typeArguments, TraitImplRef const& impl,
+        std::vector<Value>& args
     ) {
         ast::FunctionDeclaration& target =
             impl.declaration->implementations[methodIdx];
 
-        auto name =
-            nameOf(with(impl.typeArguments, {}, impl.declaration->type)) + "$" +
-            impl.declaration->trait.declaration->name.value +
-            nameOf(with(impl.typeArguments, {}, impl.declaration->trait)
-                       .typeArguments) +
-            "$" + target.name.value + nameOf(method.typeArguments);
+        auto name = nameOf(with(impl.typeArguments, {}, impl.declaration->type)
+                    ) // type name
+                    + "$" +
+                    impl.declaration->trait.declaration->fullName // trait name
+                    + nameOf(with(
+                                 impl.typeArguments, {}, impl.declaration->trait
+                      ) // trait args
+                                 .typeArguments) +
+                    "$" + target.name.value + nameOf(typeArguments);
 
         auto& func = functions[name];
         if (!func) {
-            std::vector<llvm::Type*> llvmParamTypes{};
-            llvmParamTypes.push_back(asLLVM(with(
-                impl.typeArguments, method.typeArguments, impl.declaration->type
-            )));
-
-            for (auto& arg : target.parameters) {
-                llvmParamTypes.push_back(asLLVM(
-                    with(impl.typeArguments, method.typeArguments, arg.type)
-                ));
-            }
-            auto retTypeIs = with(
-                impl.typeArguments, method.typeArguments, target.returnType
+            func = createSignature(
+                Function{&target, typeArguments}, name, thisValue.type,
+                impl.typeArguments
             );
-            auto returnTypeAsLLVM = asLLVM(std::move(retTypeIs));
-            auto funcType = llvm::FunctionType::get(
-                returnTypeAsLLVM, llvmParamTypes, false
-            );
-            auto llvmFunc = llvm::Function::Create(
-                funcType, llvm::Function::ExternalLinkage, name,
-                currentModule.get()
-            );
-            size_t i = 0;
-            for (auto& arg : llvmFunc->args()) {
-                if (i == 0) {
-                    arg.setName("this");
-                } else {
-                    arg.setName(target.parameters[i - 1].name.value);
-                }
-                ++i;
-            }
-            func = new FunctionMonomorph{
-                llvmFunc,
-                &target,
-                with(*blockTypeArguments, *typeArguments, method.typeArguments),
-                with(*blockTypeArguments, *typeArguments, impl.typeArguments),
-                thisValue.type,
-            };
             signatureStack.push_back(func);
         }
 
@@ -932,13 +975,43 @@ struct IRVisitor {
         return call(func, args);
     }
 
+    llvm::Value* callMethod(
+        Value thisValue, size_t methodIdx,
+        std::vector<Type> const& typeArguments, ImplRef const& impl,
+        std::vector<Value>& args
+    ) {
+        ast::FunctionDeclaration& target =
+            impl.declaration->functions[methodIdx];
+
+        auto name = nameOf(with(impl.typeArguments, {}, impl.declaration->type)
+                    ) // type name
+                    + "$" + target.name.value + nameOf(typeArguments);
+
+        auto& func = functions[name];
+        if (!func) {
+            func = createSignature(
+                Function{&target, typeArguments}, name, thisValue.type,
+                impl.typeArguments
+            );
+            signatureStack.push_back(func);
+        }
+        args.insert(args.begin(), thisValue);
+        return call(func, args);
+    }
+
     llvm::Value* call(FunctionMonomorph* func, std::vector<Value> const& args) {
         std::vector<llvm::Value*> argVals{};
         fmt::println("EMIT call");
+        std::cout << func << std::endl;
         for (auto& val : args) {
+            std::cout << val.asLLVM << std::endl;
             argVals.push_back(val.asLLVM);
         }
-        return builder->CreateCall(func->asLLVM, argVals);
+        fmt::println("EMIT callL");
+        auto cl = builder->CreateCall(func->asLLVM, argVals);
+        fmt::println("EMIT callR");
+        std::cout << cl->getType() << std::endl;
+        return cl;
     }
 
     Value operator()(ast::Call&& call) {
@@ -959,14 +1032,16 @@ struct IRVisitor {
             match{
                 [&](Function const& function) -> llvm::Value* {
                     fmt::println("EMIT call3");
-                    auto monomorphName = nameOf(function.typeArguments);
-                    auto& func = functions
-                        [function.declaration->name.value + monomorphName];
+                    auto monomorphName =
+                        function.declaration->annotation
+                            ? function.declaration->name.value
+                            : function.declaration->fullName +
+                                  nameOf(function.typeArguments);
+                    auto& func = functions[monomorphName];
                     if (!func) {
-                        func = createSignature(function);
+                        func = createSignature(function, monomorphName);
                         signatureStack.push_back(func);
                     }
-                    std::vector<llvm::Value*> argVals{};
                     auto result = this->call(func, args);
                     for (size_t i = 0; i < args.size(); ++i) {
                         if (owners[i].index() == 0)
@@ -975,13 +1050,7 @@ struct IRVisitor {
                     return result;
                 },
                 [&](type::Named const& type) -> llvm::Value* {
-                    std::cout << "now, for type " << std::endl;
-                    std::cout << "now, for type "
-                              << type.declaration->name.value << std::endl;
-
-                    auto named = asLLVM(type);
-
-                    auto literal = llvm::UndefValue::get(named);
+                    auto literal = llvm::UndefValue::get(asLLVM(type));
                     for (size_t i = 0; i < args.size(); ++i) {
                         builder->CreateInsertValue(
                             literal, copy(args[i]),
@@ -992,24 +1061,45 @@ struct IRVisitor {
                     return literal;
                 },
                 [&](TraitMethodRef const& method) -> llvm::Value* {
-                    fmt::println("EMIT call4");
-                    ImplRef impl = implScope.find(
-                        with(
-                            *blockTypeArguments, *typeArguments, method.thisType
-                        ),
+                    ast::PropertyAccess& access =
+                        std::get<ast::PropertyAccess>(call.lhs->value);
+                    auto lhs = (*this)(*access.lhs);
+                    TraitImplRef impl = implScope.find(
+                        with(*blockTypeArguments, *typeArguments, lhs.type),
                         with(*blockTypeArguments, *typeArguments, method.trait)
                     );
 
-                    ast::PropertyAccess& access =
-                        std::get<ast::PropertyAccess>(call.lhs->value);
+                    // impl.
+                    std::vector<Value> args2{args};
                     auto result = callTraitMethod(
-                        (*this)(*access.lhs), access.propertyIdx, method, impl,
-                        args
+                        lhs, access.propertyIdx, method.typeArguments, impl,
+                        args2
                     );
+                    std::cout << "has called trait " << args.size() << " "
+                              << owners.size() << std::endl;
                     for (size_t i = 0; i < args.size(); ++i) {
                         if (owners[i].index() == 0)
                             drop(args[i]);
                     }
+                    std::cout << "after drop" << std::endl;
+                    return result;
+                },
+                [&](ImplRef const& method) -> llvm::Value* {
+                    ast::PropertyAccess& access =
+                        std::get<ast::PropertyAccess>(call.lhs->value);
+                    auto lhs = (*this)(*access.lhs);
+
+                    std::vector<Value> args2{args};
+                    auto result = callMethod(
+                        lhs, access.propertyIdx, method.typeArguments, method,
+                        args2
+                    );
+
+                    for (size_t i = 0; i < args.size(); ++i) {
+                        if (owners[i].index() == 0)
+                            drop(args[i]);
+                    }
+
                     return result;
                 },
             },
@@ -1025,7 +1115,6 @@ struct IRVisitor {
             return never;
         }
         std::vector<unsigned int> indices{};
-        fmt::println("asdasdasd {}, {}", access.namedDepth, access.propertyIdx);
         while (access.namedDepth) {
             --access.namedDepth;
             indices.push_back(0);
@@ -1364,22 +1453,27 @@ struct IRVisitor {
         function->asLLVM->insert(function->asLLVM->end(), entry);
         builder->SetInsertPoint(entry);
 
+        typeArguments = &function->typeArguments;
+        blockTypeArguments = &function->blockTypeArguments;
         auto arg = function->asLLVM->args().begin();
         ast::Binding temp;
         if (function->thisType) {
-            std::cout << ":bind this " << cleanupStack.size() << std::endl;
-            cleanupStack.push_back({&*arg});
+            std::cout << ":bind this " << *function->thisType << std::endl;
+            cleanupStack.push_back({&*arg, *function->thisType});
             ++arg;
         }
         size_t i = 0;
         while (arg != function->asLLVM->args().end()) {
             std::cout << ":bind arg" << std::endl;
-            cleanupStack.push_back({&*arg});
+            cleanupStack.push_back(
+                {&*arg, with(
+                            *blockTypeArguments, *typeArguments,
+                            function->definition->parameters[i].type
+                        )}
+            );
             ++arg;
             ++i;
         }
-        typeArguments = &function->typeArguments;
-        blockTypeArguments = &function->blockTypeArguments;
 
         std::cout << "looking for trait bounds" << std::endl;
 
@@ -1405,9 +1499,10 @@ struct IRVisitor {
     void operator()(TypeMonomorph* type) {}
 
     void emitMain(ast::Expression&& mainBody) {
-        functions["rtAlloc"] = createSignature(allocFunc);
-        functions["rtSlice"] = createSignature(sliceFunc);
-        functions["rtFree"] = createSignature(freeFunc);
+        functions["rtAlloc"] = createSignature(allocFunc, "rtAlloc");
+        functions["rtMove"] = createSignature(moveFunc, "rtMove");
+        functions["rtSlice"] = createSignature(sliceFunc, "rtSlice");
+        functions["rtFree"] = createSignature(freeFunc, "rtFree");
         std::cout << "sigs done" << std::endl;
 
         rtOobError = llvm::Function::Create(
@@ -1470,7 +1565,7 @@ struct IRVisitor {
     }
 
     std::string nameOf(type::Named const& named) {
-        std::string mono{named.declaration->name.value};
+        std::string mono{named.declaration->fullName};
         fmt::println("OF {}", named.declaration->name.value);
         mono.append(nameOf(named.typeArguments));
         return std::move(mono);
@@ -1644,8 +1739,7 @@ struct IRVisitor {
                 callTraitMethod(
                     {builder->CreateExtractValue(*value, indices), value->owner,
                      type},
-                    0, TraitMethodRef{type, Trait{copyDeclaration, {}}, {}},
-                    copyImpl.value(), args
+                    0, {}, copyImpl.value(), args
                 ),
                 indices
             );
@@ -1668,11 +1762,7 @@ struct IRVisitor {
             std::vector<Value> args;
 
             return {
-                callTraitMethod(
-                    value, 0,
-                    TraitMethodRef{value.type, Trait{copyDeclaration, {}}, {}},
-                    copyImpl.value(), args
-                ),
+                callTraitMethod(value, 0, {}, copyImpl.value(), args),
                 {},
                 value.type,
             };
@@ -1691,8 +1781,7 @@ struct IRVisitor {
                 implScope.tryFind(type, Trait{dropDeclaration, {}})) {
             std::vector<Value> args;
             callTraitMethod(
-                {builder->CreateExtractValue(value, indices), 0, type}, 0,
-                TraitMethodRef{type, Trait{dropDeclaration, {}}, {}},
+                {builder->CreateExtractValue(value, indices), 0, type}, 0, {},
                 dropImpl.value(), args
             );
             return;
@@ -1711,9 +1800,7 @@ struct IRVisitor {
                 implScope.tryFind(value.type, Trait{dropDeclaration, {}})) {
             std::vector<Value> args;
             callTraitMethod(
-                {value, 0, value.type}, 0,
-                TraitMethodRef{value.type, Trait{dropDeclaration, {}}, {}},
-                dropImpl.value(), args
+                {value, 0, value.type}, 0, {}, dropImpl.value(), args
             );
             return;
         }

@@ -11,16 +11,23 @@
 using Lexer = lexer::WithPunctuations<
     ",", ".", "(", ")", "[", "]", "<", ">", "<=", ">=", "->", "{", "}", ":",
     ":<", "/", "*", "+", "-", ";", "=", "!", "==", "!=", "&&", "||", "..", "=>",
-    "&", "@">::
+    "&", "@", "::">::
     Lexer<
         "fun", "type", "break", "return", "continue", "if", "while", "else",
-        "match", "let", "var", "as", "is", "trait", "def">;
+        "match", "let", "var", "as", "is", "trait", "def", "import">;
 
 template <class T>
 concept Token = contains<T, Lexer::Token>;
 
 namespace ast {
 struct Expression;
+
+struct Path {
+    Span span;
+    std::vector<lexer::Identifier> segments;
+
+    std::string str() const;
+};
 
 template <String op> struct Binary {
     Span span;
@@ -53,15 +60,23 @@ struct While {
     UPtr<Condition> condition;
     UPtr<Expression> body;
     Type type;
-
-    bool useBody;
 };
+
+// struct Fold {
+//     Span span;
+//     UPtr<Expression> initial;
+//     bool isMutable;
+//     UPtr<Pattern> condition;
+//     UPtr<Expression> body;
+
+//     Type type;
+// };
 
 struct TypeName;
 
 struct TraitName {
     Span span;
-    lexer::Identifier name;
+    Path name;
     std::vector<TypeName> typeArgumentNames;
 };
 
@@ -73,7 +88,7 @@ struct Annotation {
 struct NamedType {
     Span span;
     std::optional<Annotation> annotation;
-    lexer::Identifier name;
+    Path name;
     std::vector<TypeName> typeArgumentNames;
 };
 
@@ -173,7 +188,7 @@ struct Call {
     std::vector<TypeName> typeArgumentNames;
     std::vector<Expression> argValues;
 
-    std::variant<type::Named, Function, TraitMethodRef> target;
+    std::variant<type::Named, Function, TraitMethodRef, ImplRef> target;
     Type type;
 };
 
@@ -225,10 +240,14 @@ struct Binding {
 
 struct Variable {
     Span span;
-    std::string name;
+    Path name;
 
     size_t binding;
     bool mayMove;
+
+    Variable(Path&& _path);
+    Variable(Span _span, Path&& _path);
+    Variable(Span _span, Path&& _path, size_t binding);
 };
 
 struct TypeExpression {
@@ -426,6 +445,7 @@ struct Signature {
     std::vector<Parameter> parameters;
     std::optional<TypeName> returnTypeName;
 
+    std::string fullName;
     std::vector<std::pair<Type, Trait>> traitBounds;
     Type returnType;
 };
@@ -446,6 +466,7 @@ struct TypeDeclaration {
     TypeName protoName;
 
     Type proto;
+    std::string fullName;
 };
 
 struct TraitDeclaration {
@@ -454,6 +475,7 @@ struct TraitDeclaration {
     std::vector<TypeParameter> typeParameterNames;
     std::vector<Signature> signatures;
 
+    std::string fullName;
     std::vector<std::pair<Type, Trait>> traitBounds;
 };
 
@@ -469,11 +491,29 @@ struct TraitImplementation {
     std::vector<std::pair<Type, Trait>> traitBounds;
 };
 
+struct Implementation {
+    Span span;
+    std::vector<TypeParameter> typeParameterNames;
+    TypeName typeName;
+    std::vector<FunctionDeclaration> functions;
+
+    Type type;
+    std::vector<std::pair<Type, Trait>> traitBounds;
+};
+
+struct Import {
+    Span span;
+    lexer::StringLiteral path;
+    lexer::Identifier name;
+};
+
 struct Program {
     std::vector<TypeDeclaration> typeDeclarations;
     std::vector<TraitDeclaration> traitDeclarations;
     std::vector<TraitImplementation> traitImplementations;
+    std::vector<Implementation> implementations;
     std::vector<FunctionDeclaration> functions;
+    std::vector<Import> imports;
 };
 } // namespace ast
 
@@ -482,6 +522,20 @@ struct Program {
 #else
 #define CLANG_RUNTIME(string) string
 #endif
+
+template <> struct fmt::formatter<lexer::Identifier> : formatter<std::string> {
+    auto format(lexer::Identifier const& variable, auto& ctx) const {
+        return fmt::format_to(ctx.out(), "{}", variable.value);
+    }
+};
+
+template <> struct fmt::formatter<ast::Path> : formatter<std::string> {
+    auto format(ast::Path const& path, auto& ctx) const {
+        return fmt::format_to(ctx.out(), "{}", fmt::join(path.segments, "::"));
+    }
+};
+
+std::ostream& operator<<(std::ostream& stream, ast::Path const& path);
 
 template <> struct fmt::formatter<ast::Property> : formatter<std::string> {
     auto format(ast::Property const& property, auto& ctx) const {
@@ -677,12 +731,6 @@ struct fmt::formatter<lexer::StringLiteral> : formatter<std::string> {
 template <> struct fmt::formatter<ast::Variable> : formatter<std::string> {
     auto format(ast::Variable const& variable, auto& ctx) const {
         return fmt::format_to(ctx.out(), "{}", variable.name);
-    }
-};
-
-template <> struct fmt::formatter<lexer::Identifier> : formatter<std::string> {
-    auto format(lexer::Identifier const& variable, auto& ctx) const {
-        return fmt::format_to(ctx.out(), "{}", variable.value);
     }
 };
 

@@ -117,6 +117,7 @@ template <class T> consteval auto createPrecedenceHierarchy(Rule<T>) {
         .binaryGroup("||"_p);
 }
 
+constexpr auto path = Rule<Path>{};
 constexpr auto ident = Rule<lexer::Identifier>{};
 constexpr auto integer = Rule<lexer::IntegerLiteral>{};
 constexpr auto floating = Rule<lexer::FloatLiteral>{};
@@ -132,11 +133,12 @@ constexpr auto prefixExpression = Rule<PrefixExpression>{};
 
 // clang-format off
 
+RULE(Variable, variable) = path;
 RULE(Property, property) = ident + option(":"_p + expression);
 RULE(StructLiteral, structLiteral) = "{"_p + separatedWith<",">(property) + "}"_p;
 
 constexpr auto scrutineePrimary = as<Expression>(
-    as<Variable>(ident) | structLiteral |
+    variable | structLiteral |
     (tuple | expression) | vector
 );
 
@@ -157,7 +159,7 @@ RULE(MatchCase, matchCase) = openPattern + "=>"_p + matchArm;
 RULE(Match, _match) = "match"_kw + scrutinee + "{"_p + separatedWith<",">(matchCase) + "}"_p;
 
 constexpr auto primaryGuard = as<Expression>(
-    as<Variable>(ident) | integer | string | floating
+    variable | integer | string | floating
 );
 
 constexpr auto primaryExpression = as<Expression>(
@@ -179,13 +181,13 @@ constexpr auto guard = createPrecedenceHierarchy(prefixGuard);
 constexpr auto tupleExpression = as<Expression>(singleOrMultipleAs<TupleLiteral>(expression));
 
 RULE(PropertyDeclaration, propertyDeclaration) = ident + ":"_p + typeName;
-RULE(NamedType, namedType) = option("@"_p + as<Annotation>(ident)) + ident + optionOrDefault("<"_p + separatedWith<",">(typeName) + ">"_p);
+RULE(NamedType, namedType) = option("@"_p + as<Annotation>(ident)) + path + optionOrDefault("<"_p + separatedWith<",">(typeName) + ">"_p);
 RULE(TupleType, tupleType) = "("_p + separatedWith<",">(typeName) + ")"_p;
 RULE(StructType, structType) = "{"_p + separatedWith<",">(propertyDeclaration) + "}"_p;
 RULE(VectorType, vectorType) = "["_p + typeName + "]"_p;
 RULE(TypeName, _typeName) = namedType | tupleType | structType | vectorType;
 
-RULE(TraitName, traitName) = ident + optionOrDefault("<"_p + separatedWith<",">(typeName) + ">"_p);
+RULE(TraitName, traitName) = path + optionOrDefault("<"_p + separatedWith<",">(typeName) + ">"_p);
 
 RULE(Return, _return) = "return"_kw + option(tupleExpression);
 RULE(Continue, _continue) = "continue"_kw + option(tupleExpression);
@@ -240,7 +242,7 @@ RULE(TypeDeclaration, typeDeclaration) = "type"_kw + ident + typeParameterList +
 RULE(TraitDeclaration, traitDeclaration) = "trait"_kw + ident + typeParameterList + "{"_p + list(signature) + "}"_p;
 RULE(FunctionBody, functionBody) = as<Expression>(as<Expression>("->"_p + tupleExpression) | as<Expression>(block));
 RULE(FunctionDeclaration, functionDeclaration) = signature + functionBody;
-RULE(TraitImplementation, traitImplementation) = "def"_kw + typeParameterList + typeName + "as"_kw + traitName + "{"_p + list(functionDeclaration) + "}"_p;
+RULE(Import, import) = "import"_kw + string + "as"_kw + ident;
 
 // these rules are only used in the parsePostfixes function, but cannot be inlined because clang cries
 constexpr auto indexAccess = "["_p + tupleExpression + "]"_p;

@@ -104,6 +104,7 @@ T make(auto&& spanned)
     requires requires(T t) {
         t.span;
         spanned.span;
+        spanned.value;
     }
 {
     return make<T>(spanned.span, spanned.value);
@@ -157,6 +158,7 @@ template <> constexpr String expected<Block> = "a block";
 template <> constexpr String expected<FunctionBody> = "{ or ->";
 template <> constexpr String expected<PrefixGuard> = "a guard";
 template <> constexpr String expected<Annotation> = "an annotation";
+template <> constexpr String expected<Path> = "an identifier";
 
 template <class L, class... ops>
 constexpr String expected<PrecedenceGroup<L, ops...>> = expected<L>;
@@ -510,7 +512,7 @@ class Parser : public logs::MessageLog {
 
     std::optional<Expression>
     parse(Rule<std::variant<Variable, StructLiteral>>) {
-        auto name = parse(ident);
+        auto name = parse(path);
         if (!name) {
             return {};
         }
@@ -534,14 +536,14 @@ class Parser : public logs::MessageLog {
         }
 
         if (!typeArguments) {
-            return Variable{name->span, name->value};
+            return Variable{name->span, std::move(*name)};
         }
 
         auto args = parse("("_p + separatedWith<",">(expression) + ")"_p);
         if (args) {
             return Call{
                 name->span.to(args->span),
-                Expression{Variable{name->span, name->value}},
+                Expression{Variable{name->span, std::move(*name)}},
                 std::move(typeArguments->value),
                 std::move(args->value),
             };
@@ -559,12 +561,11 @@ class Parser : public logs::MessageLog {
     }
 
     std::optional<Pattern> parse(Rule<Pattern>) {
-        auto name = parse(ident);
+        auto name = parse(path);
         if (name) {
             auto tuple = parse(destructureTuple);
             if (tuple) {
-                tuple->name =
-                    NamedType{name->span, {}, std::move(name->value), {}};
+                tuple->name = NamedType{name->span, {}, std::move(*name), {}};
                 tuple->span = name->span.to(tuple->span);
                 return parseExplicitGuard(Destructure{std::move(tuple.value())}
                 );
@@ -573,7 +574,7 @@ class Parser : public logs::MessageLog {
             auto structure = parse(destructureStruct);
             if (structure) {
                 structure->name =
-                    NamedType{name->span, {}, std::move(name->value), {}};
+                    NamedType{name->span, {}, std::move(*name), {}};
                 structure->span = name->span.to(structure->span);
                 return parseExplicitGuard(Destructure{
                     std::move(structure.value())});
@@ -643,12 +644,12 @@ class Parser : public logs::MessageLog {
                             ? std::get_if<Variable>(&firstExpression->value)
                             : nullptr;
 
-        if (var) {
+        if (var && var->name.segments.size() == 1) {
             if (auto closingBrace = parse("}"_p)) {
                 std::vector<Property> v{};
                 v.push_back(Property{
                     var->span,
-                    std::move(var->name),
+                    std::move(var->name.str()),
                     std::optional<Expression>{},
                 });
                 return StructLiteral{
@@ -667,7 +668,7 @@ class Parser : public logs::MessageLog {
                     restProps.begin(),
                     Property{
                         var->span.to(spanOf(firstValue)),
-                        std::move(var->name),
+                        std::move(var->name.str()),
                         std::optional{std::move(firstValue)},
                     }
                 );
@@ -682,6 +683,19 @@ class Parser : public logs::MessageLog {
             spanOf(first.value()),
             BlockItem{std::move(std::get<BlockItem>(first->value))}
         );
+    }
+
+    std::optional<Path> parse(Rule<Path>) {
+        auto first = parse(ident);
+        if (!first)
+            return {};
+        Path path{spanOf(*first), {std::move(*first)}};
+
+        while (auto segment = parse("::"_p + ident)) {
+            path.segments.push_back(segment->value);
+            path.span = path.span.to(segment->span);
+        }
+        return path;
     }
 
     std::optional<Block> parse(Rule<Block>) {
@@ -707,6 +721,36 @@ class Parser : public logs::MessageLog {
         return Block{span, std::move(items), !hasTrailing};
     }
 
+    std::optional<std::variant<Implementation, TraitImplementation>>
+    parseImplementation() {
+        auto parsed = parse(
+            "def"_kw + typeParameterList + typeName +
+            option("as"_kw + traitName) + "{"_p + list(functionDeclaration) +
+            "}"_p
+        );
+        if (!parsed) {
+            return {};
+        }
+
+        auto [tParamList, type, trait, declarations] = std::move(parsed->value);
+        if (trait) {
+            return TraitImplementation{
+                parsed->span,
+                std::move(tParamList),
+                std::move(type),
+                std::move(trait.value()),
+                std::move(declarations),
+            };
+        }
+
+        return Implementation{
+            parsed->span,
+            std::move(tParamList),
+            std::move(type),
+            std::move(declarations),
+        };
+    }
+
     Program parseProgram() {
         Program program{};
 
@@ -724,10 +768,25 @@ class Parser : public logs::MessageLog {
                     program.traitDeclarations.push_back(std::move(*trait));
                     continue;
                 }
-                if (auto implementation = parse(traitImplementation)) {
-                    program.traitImplementations.push_back(
+                if (auto implementation = parseImplementation()) {
+                    std::visit(
+                        match{
+                            [&](ast::TraitImplementation&& traitImpl) {
+                                program.traitImplementations.push_back(
+                                    std::move(traitImpl)
+                                );
+                            },
+                            [&](ast::Implementation&& impl) {
+                                program.implementations.push_back(std::move(impl
+                                ));
+                            },
+                        },
                         std::move(*implementation)
                     );
+                    continue;
+                }
+                if (auto imp = parse(import)) {
+                    program.imports.push_back(std::move(*imp));
                     continue;
                 }
                 logUnexpectedToken("a declaration");
@@ -738,7 +797,7 @@ class Parser : public logs::MessageLog {
         };
 
         return program;
-    }
+    } // namespace parser
 };
 } // namespace parser
 

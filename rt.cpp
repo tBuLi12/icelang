@@ -21,9 +21,15 @@ void rtFree(void* buffer) {
 }
 
 void rtSlice(unsigned char* buffer, int32_t offset, int32_t length) {
-    std::cout << "slicerino " << offset << " " << length << std::endl;
+    // std::cout << "slicerino " << offset << " " << length << std::endl;
     std::memmove(buffer, buffer + offset, length);
-    std::cout << "then " << *reinterpret_cast<int32_t*>(buffer) << std::endl;
+    // std::cout << "then " << *reinterpret_cast<int32_t*>(buffer) << std::endl;
+}
+
+void rtMove(
+    int32_t offset, unsigned char* buffer, unsigned char* src, int32_t length
+) {
+    std::memcpy(buffer + offset, src, length);
 }
 
 void rtOobError(char* message, int32_t index, int32_t length) {
