@@ -32,37 +32,51 @@ Span spanOf(auto const& thing)
     return thing.span;
 }
 
-void collectFunctions(
+std::vector<ast::FunctionDeclaration*> collectFunctions(
     std::unordered_map<std::string, ast::FunctionDeclaration*>& scope,
     ast::Program& program, std::string const& modName
 ) {
+    std::vector<ast::FunctionDeclaration*> redefinitions{};
     for (auto& function : program.functions) {
         function.fullName = fmt::format("{}::{}", modName, function.name.value);
+        if (scope.find(function.fullName) != scope.end()) {
+            redefinitions.push_back(&function);
+        }
         scope[function.fullName] = &function;
     }
+    return redefinitions;
 }
 
-void collectNamedTypes(
+std::vector<ast::TypeDeclaration*> collectNamedTypes(
     std::unordered_map<std::string, ast::TypeDeclaration*>& scope,
     ast::Program& program, std::string const& modName
 ) {
+    std::vector<ast::TypeDeclaration*> redefinitions{};
     for (auto& typeDeclaration : program.typeDeclarations) {
         typeDeclaration.fullName =
             fmt::format("{}::{}", modName, typeDeclaration.name.value);
-        std::cout << "collected " << typeDeclaration.fullName << std::endl;
+        if (scope.find(typeDeclaration.fullName) != scope.end()) {
+            redefinitions.push_back(&typeDeclaration);
+        }
         scope[typeDeclaration.fullName] = &typeDeclaration;
     }
+    return redefinitions;
 }
 
-void collectTraitDeclarations(
+std::vector<ast::TraitDeclaration*> collectTraitDeclarations(
     std::unordered_map<std::string, ast::TraitDeclaration*>& scope,
     ast::Program& program, std::string const& modName
 ) {
+    std::vector<ast::TraitDeclaration*> redefinitions{};
     for (auto& traitDeclaration : program.traitDeclarations) {
         traitDeclaration.fullName =
             fmt::format("{}::{}", modName, traitDeclaration.name.value);
+        if (scope.find(traitDeclaration.fullName) != scope.end()) {
+            redefinitions.push_back(&traitDeclaration);
+        }
         scope[traitDeclaration.fullName] = &traitDeclaration;
     }
+    return redefinitions;
 }
 
 struct TraitBoundScope {
@@ -3206,9 +3220,15 @@ struct TypeChecker {
 
         for (auto& mod : program) {
             currentModule = mod;
-            collectFunctions(funcScope, mod->program, mod->moduleId);
-            collectNamedTypes(typeScope, mod->program, mod->moduleId);
-            collectTraitDeclarations(traitScope, mod->program, mod->moduleId);
+            for (auto redeclaration :  collectFunctions(funcScope, mod->program, mod->moduleId)) {
+                logError(redeclaration->span, "duplicate declaration", "function {} was already declared", redeclaration->name.value);
+            }
+            for (auto redeclaration :  collectNamedTypes(typeScope, mod->program, mod->moduleId)) {
+                logError(redeclaration->span, "duplicate declaration", "type {} was already declared", redeclaration->name.value);
+            }
+            for (auto redeclaration :  collectTraitDeclarations(traitScope, mod->program, mod->moduleId)) {
+                logError(redeclaration->span, "duplicate declaration", "trait {} was already declared", redeclaration->name.value);
+            }
             for (auto& impl : mod->program.implementations) {
                 for (auto& func : impl.functions) {
                     func.fullName =
