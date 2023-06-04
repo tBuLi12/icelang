@@ -2339,6 +2339,10 @@ struct TypeChecker {
                                 );
                             }
                         } else {
+                            if (!allowGuards) {
+                                check.logError(spanOf(expression), "error", "guards are not allowed in this context");
+                                return;
+                            }
                             body.anonymous = true;
                             check.scope.enter();
                             std::cout << "G " << std::endl;
