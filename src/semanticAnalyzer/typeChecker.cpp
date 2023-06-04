@@ -840,7 +840,8 @@ struct VariableScope : std::vector<std::unordered_map<std::string, size_t>> {
     bool matchedFieldWasAnonymous;
 
     void add(std::string const& name, Type type, bool isMutable = false) {
-        back()[name] = bindings.size();
+        if (name.length() > 0)
+            back()[name] = bindings.size();
         bindings.push_back({{}, type, isMutable});
     }
 
@@ -1470,6 +1471,10 @@ struct TypeChecker {
         }
         scope.enter();
         for (auto& parameter : function.parameters) {
+            if (scope.back().find(parameter.name.value) != scope.back().end()) {
+                logError(parameter.name.span, "duplicate binding", "{} has already been declared in this scope", parameter.name.value);
+                continue;
+            }
             scope.add(parameter.name.value, parameter.type, false);
         }
         implementationScope.currentBounds.local = &function.traitBounds;
@@ -2275,6 +2280,7 @@ struct TypeChecker {
         bool isMutable;
 
         void operator()(ast::Pattern& pattern, Type const& type) {
+                        std::cout << "checking PATT" << type << std::endl;
             check.scope.matchMutable = isMutable;
             (*this)(pattern.body, type);
             if (pattern.guard) {
@@ -2436,6 +2442,10 @@ struct TypeChecker {
                                     "a vector pattern"
                                 );
                             } else if (rest.binding) {
+                                if (check.scope.back().find(rest.binding->value) != check.scope.back().end()) {
+                                    check.logError(rest.binding->span, "duplicate binding", "{} has already been declared in this scope", rest.binding->value);
+                                    return;
+                                }
                                 check.scope.add(
                                     rest.binding->value, vectorType, isMutable
                                 );

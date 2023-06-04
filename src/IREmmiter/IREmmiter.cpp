@@ -96,6 +96,7 @@ struct IRVisitor {
     ast::TraitDeclaration* copyDeclaration;
     ast::TraitDeclaration* dropDeclaration;
     llvm::Function* rtOobError;
+    llvm::Function* rtZeroDivError;
 
     std::vector<Value> temporaryCleanup{};
     std::vector<ast::Binding> cleanupStack{};
@@ -330,25 +331,21 @@ struct IRVisitor {
 
     llvm::Value* indexVector(Value vector, Value index, Span accessSpan) {
         llvm::Value* vecLen = builder->CreateExtractValue(vector, {0, 2});
-        auto isOutOfBounds = builder->CreateICmpSGE(index, vecLen);
 
+        auto isOutOfBounds = builder->CreateICmpSGE(index, vecLen);
         auto outOfBounds = createBlock("outofbounds");
         auto inBounds = createBlock("inbounds");
-
         builder->CreateCondBr(isOutOfBounds, outOfBounds, inBounds);
         appendAndSetInsertTo(outOfBounds);
         std::stringstream error{};
-        fmt::println("into8 index access");
         logs::SpannedMessage msg{currentFunction->location->source, accessSpan, "", ""};
-        fmt::println("into9 index access");
-        std::cout << msg << std::endl;
         msg.printBodyTo(error);
         auto errorMessage =
             builder->CreateGlobalStringPtr(error.str(), "oobError");
         builder->CreateCall(rtOobError, {errorMessage, index, vecLen});
         builder->CreateBr(inBounds);
-
         appendAndSetInsertTo(inBounds);
+
         llvm::Value* bufPtr = builder->CreateExtractValue(vector, {0, 0});
         std::cout << std::get<type::Named>(vector.type).declaration
                   << std::endl;
@@ -486,11 +483,6 @@ struct IRVisitor {
     }
     Value chainValue;
 
-    // template <String op>
-    // Value operator()(ast::Binary<op>&& addition, Value lhs, Value rhs) {
-    //     fmt::println("unsupported {}", op.characters);
-    //     throw "";
-    // }
     Value operator()(ast::Binary<"<=">&& addition, Value lhs, Value rhs) {
         if (lhs.type == &type::floating) {
             return {builder->CreateFCmpULE(lhs, rhs), {}, &type::boolean};
@@ -523,6 +515,21 @@ struct IRVisitor {
         if (lhs.type == &type::floating) {
             return {builder->CreateFDiv(lhs, rhs), {}, &type::floating};
         }
+
+        auto isOutOfBounds = builder->CreateICmpEQ(rhs, getInt(32, 0));
+        auto outOfBounds = createBlock("outofbounds");
+        auto inBounds = createBlock("inbounds");
+        builder->CreateCondBr(isOutOfBounds, outOfBounds, inBounds);
+        appendAndSetInsertTo(outOfBounds);
+        std::stringstream error{};
+        logs::SpannedMessage msg{currentFunction->location->source, addition.span, "", ""};
+        msg.printBodyTo(error);
+        auto errorMessage =
+            builder->CreateGlobalStringPtr(error.str(), "zeroDivError");
+        builder->CreateCall(rtZeroDivError, {errorMessage});
+        builder->CreateBr(inBounds);
+        appendAndSetInsertTo(inBounds);
+
         return {builder->CreateSDiv(lhs, rhs), {}, &type::integer};
     }
 
@@ -576,15 +583,26 @@ struct IRVisitor {
 
     Value operator()(ast::Binary<"==">&& equate, Value lhs, Value rhs) {
         chainValue = rhs;
-        return Value{builder->CreateICmpEQ(lhs, rhs), {}, equate.type};
+        if (lhs.type == &type::null) return null();
+        if (lhs.type == &type::floating) {
+            return Value{builder->CreateFCmpUEQ(lhs, rhs), {}, &type::boolean};
+        }
+        return Value{builder->CreateICmpEQ(lhs, rhs), {}, &type::boolean};
     }
 
     Value operator()(ast::Binary<"!=">&& notEquals, Value lhs, Value rhs) {
-        return Value{builder->CreateICmpNE(lhs, rhs), {}, notEquals.type};
+        if (lhs.type == &type::null) return null();
+        if (lhs.type == &type::floating) {
+            return Value{builder->CreateFCmpUNE(lhs, rhs), {}, &type::boolean};
+        }
+        return Value{builder->CreateICmpNE(lhs, rhs), {}, &type::boolean};
     }
 
     Value operator()(ast::Binary<"*">&& multiplication, Value lhs, Value rhs) {
-        return Value{builder->CreateMul(lhs, rhs), {}, multiplication.type};
+        if (lhs.type == &type::floating) {
+            return Value{builder->CreateFMul(lhs, rhs), {}, &type::floating};
+        }
+        return Value{builder->CreateMul(lhs, rhs), {}, &type::integer};
     }
 
     Value operator()(ast::Condition&& condition) {
@@ -1630,6 +1648,17 @@ struct IRVisitor {
             ),
             llvm::Function::ExternalLinkage, "rtOobError", currentModule.get()
         );
+        rtZeroDivError = llvm::Function::Create(
+            llvm::FunctionType::get(
+                llvm::Type::getVoidTy(*context),
+                {
+                    llvm::PointerType::get(*context, 0),
+                },
+                false
+            ),
+            llvm::Function::ExternalLinkage, "rtZeroDivError", currentModule.get()
+        );
+
 
         auto llvmFunc = llvm::Function::Create(
             llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), false),

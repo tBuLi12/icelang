@@ -27,9 +27,7 @@ DLLEXPORT void rtFree(void* buffer) {
 }
 
 DLLEXPORT void rtSlice(unsigned char* buffer, int32_t offset, int32_t length) {
-    // std::cout << "slicerino " << offset << " " << length << std::endl;
     std::memmove(buffer, buffer + offset, length);
-    // std::cout << "then " << *reinterpret_cast<int32_t*>(buffer) << std::endl;
 }
 
 DLLEXPORT void rtMove(
@@ -45,10 +43,21 @@ DLLEXPORT void rtPrint(char* buffer, int32_t length) {
     }
 }
 
-DLLEXPORT void rtOobError(char* message, int32_t index, int32_t length) {
-    std::cout << "index out of bound: accessing index " << index
+static constexpr auto setRedColor = "\u001b[31;1m";
+static constexpr auto setBlueColor = "\u001b[36;1m";
+static constexpr auto resetColor = "\u001b[0m";
+
+DLLEXPORT void rtOobError(const char* message, int32_t index, int32_t length) {
+    std::cout << setRedColor << "index out of bound" << resetColor << ": accessing index " << index
               << " on a vector of length " << length << std::endl
-              << message << std::endl;
+              << message;
+    exit(1);
+}
+
+DLLEXPORT void rtZeroDivError(const char* message) {
+    std::cerr << setRedColor << "arithmetic error" << resetColor << ": division by zero "
+              << std::endl
+              << message;
     exit(1);
 }
 
