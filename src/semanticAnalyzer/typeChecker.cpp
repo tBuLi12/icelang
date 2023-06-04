@@ -2,10 +2,35 @@
 #include "./types.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <range/v3/all.hpp>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
-#include <filesystem>
+
+namespace views = ranges::views;
+
+template <class... Ts> Span spanOf(std::variant<Ts...> const& variant);
+Span spanOf(auto const& thing);
+
+Span spanOf(auto const& variant)
+    requires requires {
+        variant.value;
+        requires !requires { variant.span; };
+    }
+{
+    return spanOf(variant.value);
+}
+
+template <class... Ts> Span spanOf(std::variant<Ts...> const& variant) {
+    return std::visit([](auto const& item) { return spanOf(item); }, variant);
+}
+
+Span spanOf(auto const& thing)
+    requires requires { thing.span; }
+{
+    return thing.span;
+}
 
 void collectFunctions(
     std::unordered_map<std::string, ast::FunctionDeclaration*>& scope,
@@ -39,41 +64,6 @@ void collectTraitDeclarations(
         scope[traitDeclaration.fullName] = &traitDeclaration;
     }
 }
-
-struct FieldAccessor {
-    ast::PropertyAccess& access;
-
-    Type operator()(type::Struct const& structure) {
-        auto prop = std::find_if(
-            structure.properties.begin(), structure.properties.end(),
-            [&](auto& field) { return field.first == access.property.value; }
-        );
-        if (prop == structure.properties.end()) {
-            std::cout << "invalid property name" << std::endl;
-            throw "invalid property name";
-        }
-
-        size_t index = std::distance(structure.properties.begin(), prop);
-        access.propertyIdx = index;
-        return Type{structure.properties[index].second};
-    }
-    Type operator()(type::Named const& named) {
-        access.namedDepth += 1;
-        return std::visit(
-            *this, with(named.typeArguments, {}, named.declaration->proto)
-        );
-    }
-
-    Type operator()(type::Never const& never) {
-        return never;
-    }
-
-    Type operator()(auto const&) {
-        std::cout << "property access on non-struct ";
-        fmt::println("{}", *access.lhs);
-        throw "property access on non-struct";
-    }
-};
 
 struct TraitBoundScope {
     std::vector<std::pair<Type, Trait>>* local;
@@ -203,8 +193,270 @@ bool tryMatch(
     );
 }
 
-struct ImplementationScope : std::vector<ast::TraitImplementation*> {
+struct Intersect {
+    std::vector<std::optional<Type>> parameters;
+    bool ok = true;
+    size_t noft;
+    size_t noftother;
+
+    Intersect(size_t one, size_t two) : noft(one), noftother(two) {
+        parameters.resize(one + two);
+    }
+
+    struct Reindex {
+        size_t offset;
+
+        Trait operator()(Trait const& trait) {
+            return Trait{
+                trait.declaration, trait.typeArguments |
+                                       views::transform(*this) |
+                                       ranges::to<std::vector>()};
+        }
+
+        Type operator()(Type const& type) {
+            return std::visit(*this, type);
+        }
+
+        Type operator()(type::Named const& type) {
+            return type::Named{
+                type.declaration, type.typeArguments | views::transform(*this) |
+                                      ranges::to<std::vector>()};
+        }
+
+        Type operator()(type::Tuple const& type) {
+            return type::Tuple{
+                type.fields | views::transform(*this) |
+                ranges::to<std::vector>()};
+        }
+
+        Type operator()(type::Struct const& type) {
+            return type::Struct{
+                type.properties |
+                views::transform(
+                    [this](auto const& prop) -> std::pair<std::string, Type> {
+                        return {prop.first, (*this)(prop.second)};
+                    }
+                ) |
+                ranges::to<std::vector>()};
+        }
+
+        Type operator()(type::Parameter const& type) {
+            return type::Parameter{true, type.index + offset};
+        }
+
+        Type operator()(auto const& type) {
+            return type;
+        }
+    };
+
+    struct Substitute {
+        std::vector<std::optional<Type>>& params;
+
+        Trait operator()(Trait const& trait) {
+            return Trait{
+                trait.declaration, trait.typeArguments |
+                                       views::transform(*this) |
+                                       ranges::to<std::vector>()};
+        }
+
+        Type operator()(Type const& type) {
+            return std::visit(*this, type);
+        }
+
+        Type operator()(type::Named const& type) {
+            return type::Named{
+                type.declaration, type.typeArguments | views::transform(*this) |
+                                      ranges::to<std::vector>()};
+        }
+
+        Type operator()(type::Tuple const& type) {
+            return type::Tuple{
+                type.fields | views::transform(*this) |
+                ranges::to<std::vector>()};
+        }
+
+        Type operator()(type::Struct const& type) {
+            return type::Struct{
+                type.properties |
+                views::transform(
+                    [this](auto const& prop) -> std::pair<std::string, Type> {
+                        return {prop.first, (*this)(prop.second)};
+                    }
+                ) |
+                ranges::to<std::vector>()};
+        }
+
+        Type operator()(type::Parameter const& type) {
+            if (!params[type.index])
+                return type;
+            return *params[type.index];
+        }
+
+        Type operator()(auto const& type) {
+            return type;
+        }
+    };
+
+    void intersect(Type const& one, Type const& other) {
+        (*this)(one, Reindex{noft}(other));
+    }
+
+    void intersect(Trait const& tone, Trait const& tother) {
+        if (tone.declaration != tother.declaration) {
+            ok = false;
+            return;
+        }
+
+        for (auto&& [t1, t2] :
+             views::zip(tone.typeArguments, tother.typeArguments)) {
+            (*this)(t1, Reindex{noft}(t2));
+        }
+    }
+
+    std::pair<
+        std::vector<std::pair<Type, Trait>>,
+        std::vector<std::pair<Type, Trait>>>
+    mergeBounds(
+        std::vector<std::pair<Type, Trait>> const& left,
+        std::vector<std::pair<Type, Trait>> const& right
+    ) {
+        std::vector<std::pair<Type, Trait>> merged{};
+        for (auto const& [type, trait] : left) {
+            merged.push_back(
+                {Substitute{parameters}(type), Substitute{parameters}(trait)}
+            );
+        }
+        std::vector<std::pair<Type, Trait>> merged2{};
+        for (auto const& [type, trait] : right) {
+            merged2.push_back(
+                {Substitute{parameters}(Reindex{noft}(type)),
+                 Substitute{parameters}(Reindex{noft}(trait))}
+            );
+        }
+        return {merged, merged2};
+    }
+
+    bool leftIsMoreSpecialized() {
+        std::vector<type::Parameter*> referenced{};
+        for (auto&& param : parameters | views::take(noft)) {
+            if (!param) {
+                continue;
+            }
+            type::Parameter* tparam = std::get_if<type::Parameter>(&*param);
+            if (!tparam)
+                return false;
+            if (ranges::find(referenced, tparam) != referenced.end())
+                return false;
+            if (tparam->index < noft)
+                return false;
+            referenced.push_back(tparam);
+        }
+        return true;
+    }
+
+    bool rightIsMoreSpecialized() {
+        std::vector<type::Parameter*> referenced{};
+        for (auto&& param :
+             parameters | views::slice(noft, parameters.size())) {
+            if (!param) {
+                continue;
+            }
+            type::Parameter* tparam = std::get_if<type::Parameter>(&*param);
+            if (!tparam)
+                return false;
+            if (ranges::find(referenced, tparam) != referenced.end())
+                return false;
+            if (tparam->index >= noft)
+                return false;
+            referenced.push_back(tparam);
+        }
+        return true;
+    }
+
+    void operator()(Type const& left, Type const& right) {
+        std::visit(*this, left, right);
+    }
+
+    void operator()(type::Named const& left, type::Named const& right) {
+        if (left.declaration != right.declaration) {
+            ok = true;
+        }
+        for (auto&& [t1, t2] :
+             views::zip(left.typeArguments, right.typeArguments)) {
+            (*this)(t1, t2);
+        }
+    }
+
+    void operator()(type::BuiltIn* left, type::BuiltIn* right) {
+        if (left != right) {
+            ok = false;
+        }
+    }
+
+    void operator()(type::Tuple const& left, type::Tuple const& right) {
+        if (left.fields.size() != right.fields.size()) {
+            ok = false;
+        }
+        for (auto&& [t1, t2] : views::zip(left.fields, right.fields)) {
+            (*this)(t1, t2);
+        }
+    }
+
+    void operator()(type::Struct const& left, type::Struct const& right) {
+        if (left.properties.size() != right.properties.size()) {
+            ok = false;
+        }
+        for (auto&& [t1, t2] : views::zip(left.properties, right.properties)) {
+            if (t1.first != t2.first) {
+                ok = false;
+            }
+            (*this)(t1.second, t2.second);
+        }
+    }
+
+    void assertEq(type::Parameter const& left, Type const& right) {
+        if (parameters[left.index]) {
+            (*this)(*parameters[left.index], Substitute{parameters}(right));
+        } else {
+            std::vector<std::optional<Type>> dummy{};
+            dummy.resize(parameters.size());
+            dummy[left.index] = Substitute{parameters}(right);
+            for (auto& rule : parameters) {
+                if (rule) {
+                    rule = Substitute{dummy}(*rule);
+                }
+            }
+            parameters[left.index] = std::move(*dummy[left.index]);
+        }
+    }
+
+    template <class T>
+    void operator()(type::Parameter const& left, T const& right) {
+        assertEq(left, Type{T{right}});
+    }
+
+    template <class T>
+    void operator()(T const& left, type::Parameter const& right) {
+        assertEq(right, Type{T{left}});
+    }
+
+    void operator()(type::Parameter const& left, type::Parameter const& right) {
+        assertEq(left, Type{type::Parameter{right}});
+    }
+
+    void operator()(auto const&, auto const&) {
+        ok = false;
+    }
+};
+
+struct ImplementationNode {
+    ast::TraitImplementation* impl;
+    std::vector<ImplementationNode> children;
+};
+
+struct ImplementationScope {
     TraitBoundScope currentBounds;
+    ImplementationNode root;
 
     bool areSatisfied(std::vector<std::pair<Type, Trait>> const& traitBounds) {
         for (auto& [type, trait] : traitBounds) {
@@ -212,9 +464,10 @@ struct ImplementationScope : std::vector<ast::TraitImplementation*> {
                 continue;
             }
             bool found = false;
-            for (auto implementation : *this) {
+            for (auto implementation : root.children) {
                 if ((found =
-                         matches(*implementation, trait, type).has_value())) {
+                         matches(*implementation.impl, trait, type).has_value()
+                    )) {
                     break;
                 }
             }
@@ -223,6 +476,29 @@ struct ImplementationScope : std::vector<ast::TraitImplementation*> {
             }
         }
         return true;
+    }
+
+    std::vector<size_t>
+    areSatisfiedAll(std::vector<std::pair<Type, Trait>> const& traitBounds) {
+        std::vector<size_t> notSatisfied{};
+        for (auto&& [i, traitBound] : traitBounds | views::enumerate) {
+            auto&& [type, trait] = traitBound;
+            if (currentBounds.includes(trait, type)) {
+                continue;
+            }
+            bool found = false;
+            for (auto implementation : root.children) {
+                if ((found =
+                         matches(*implementation.impl, trait, type).has_value()
+                    )) {
+                    break;
+                }
+            }
+            if (!found) {
+                notSatisfied.push_back(i);
+            }
+        }
+        return notSatisfied;
     }
 
     std::optional<std::vector<Type>> matches(
@@ -260,11 +536,25 @@ struct ImplementationScope : std::vector<ast::TraitImplementation*> {
                    : std::optional<std::vector<Type>>{};
     }
 
+    std::optional<TraitImplRef> tryFindIn(
+        ImplementationNode const& node, Type const& type, Trait const& trait
+    ) {
+        if (auto found = matches(*node.impl, trait, type)) {
+            std::cout << "impl found" << type << std::endl;
+            for (auto child : node.children) {
+                if (auto moreSpecialized = tryFindIn(child, type, trait)) {
+                    return moreSpecialized;
+                }
+            }
+            return {{node.impl, std::move(found.value())}};
+        }
+        return {};
+    }
+
     std::optional<TraitImplRef> tryFind(Type const& type, Trait const& trait) {
-        for (auto implementation : *this) {
-            if (auto found = matches(*implementation, trait, type)) {
-                std::cout << "impl found" << type << std::endl;
-                return {{implementation, std::move(found.value())}};
+        for (auto implementation : root.children) {
+            if (auto found = tryFindIn(implementation, type, trait)) {
+                return found;
             }
         }
         return {};
@@ -278,6 +568,229 @@ struct ImplementationScope : std::vector<ast::TraitImplementation*> {
 
         std::cout << "FATAL: impl not found" << std::endl;
         throw "impl not found";
+    }
+
+    enum class ImplSpan {
+        Overlapping,
+        Greater,
+        Lesser,
+        Equal,
+        Disjoint,
+    };
+
+    ImplSpan compare(
+        std::vector<std::pair<Type, Trait>> const& left,
+        std::vector<std::pair<Type, Trait>> const& right, size_t s
+    ) {
+        auto isSatisfiableBy = [&](ast::TraitImplementation* impl,
+                                   Type const& type,
+                                   Trait const& trait) -> bool {
+            if (impl->trait.declaration != trait.declaration) {
+                std::cout << "no cuz name" << std::endl;
+                return false;
+            }
+
+            std::vector<std::optional<Type>> inferredTypeArguments{};
+            std::vector<std::optional<Type>> dummy{};
+            inferredTypeArguments.resize(s);
+
+            for (size_t i = 0; i < impl->trait.typeArguments.size(); ++i) {
+                if (!tryMatch(
+                        inferredTypeArguments, dummy, trait.typeArguments[i],
+                        impl->trait.typeArguments[i]
+                    )) {
+                    std::cout << "no cuz trait args" << std::endl;
+                    return false;
+                }
+            }
+
+            if (!tryMatch(inferredTypeArguments, dummy, type, impl->type)) {
+                std::cout << "no cuz type" << std::endl;
+                return false;
+            }
+            return true;
+        };
+        auto isNotSatisfiable = [&](std::pair<Type, Trait> const& bound
+                                ) -> bool {
+            Trait const& trait = bound.second;
+            Type const& type = bound.first;
+            for (auto implementation : root.children) {
+                if (isSatisfiableBy(implementation.impl, type, trait)) {
+                    return false;
+                }
+            };
+
+            std::cout << "not satisfiable: " << bound.first << " is "
+                      << bound.second.declaration->name.value << std::endl;
+            return true;
+        };
+        if (ranges::any_of(left, isNotSatisfiable) ||
+            ranges::any_of(right, isNotSatisfiable)) {
+            std::vector<size_t> ttt{};
+            std::cout << "not satisfiable " << left.size() << ' '
+                      << right.size() << std::endl;
+            std::cout << "said bounds "
+                      << ranges::any_of(ttt, [](size_t i) { return true; })
+                      << std::endl;
+            return ImplSpan::Disjoint;
+        }
+        std::cout << "satisfiable " << left.size() << ' ' << right.size()
+                  << std::endl;
+        auto lInR =
+            ranges::all_of(left, [&](std::pair<Type, Trait> const& bound) {
+                std::cout << bound.first << " is "
+                          << bound.second.declaration->name.value << std::endl;
+                return ranges::find(right, bound) != right.end();
+            });
+        auto rInL =
+            ranges::all_of(right, [&](std::pair<Type, Trait> const& bound) {
+                std::cout << bound.first << " is "
+                          << bound.second.declaration->name.value << std::endl;
+                return ranges::find(left, bound) != left.end();
+            });
+        if (lInR && rInL)
+            return ImplSpan::Equal;
+        if (lInR)
+            return ImplSpan::Greater;
+        if (rInL)
+            return ImplSpan::Lesser;
+        std::cout << "bounds overlapping" << std::endl;
+        return ImplSpan::Overlapping;
+    }
+
+    ImplSpan
+    compare(ast::TraitImplementation* impl, ast::TraitImplementation* other) {
+        Intersect is{
+            impl->typeParameterNames.size(), other->typeParameterNames.size()};
+        is.intersect(impl->type, other->type);
+        is.intersect(impl->trait, other->trait);
+        if (!is.ok) {
+            std::cout << "said structure" << std::endl;
+            return ImplSpan::Disjoint;
+        }
+
+        auto [lBounds, rBounds] =
+            is.mergeBounds(impl->traitBounds, other->traitBounds);
+        auto boundCmp = compare(
+            lBounds, rBounds,
+            impl->typeParameterNames.size() + other->typeParameterNames.size()
+        );
+        if (boundCmp == ImplSpan::Disjoint)
+            return ImplSpan::Disjoint;
+
+        for (auto& param : is.parameters) {
+            if (param) {
+                std::cout << *param << std::endl;
+            } else {
+                std::cout << "nope" << std::endl;
+            }
+        }
+
+        bool lMore = is.leftIsMoreSpecialized();
+        bool rMore = is.rightIsMoreSpecialized();
+
+        std::cout << "structural compare " << rMore << lMore << std::endl;
+        if (lMore && rMore)
+            return boundCmp;
+        if (lMore) {
+            if (boundCmp == ImplSpan::Equal || boundCmp == ImplSpan::Lesser) {
+                return ImplSpan::Lesser;
+            }
+        }
+        if (rMore) {
+            if (boundCmp == ImplSpan::Equal || boundCmp == ImplSpan::Greater) {
+                return ImplSpan::Greater;
+            }
+        };
+        return ImplSpan::Overlapping;
+    }
+
+    std::vector<logs::SpannedMessage> appendTo(
+        std::vector<ImplementationNode>& nodes, ast::TraitImplementation* impl
+    ) {
+        std::vector<logs::SpannedMessage> errors{};
+        std::cout << "append to..." << std::endl;
+        ImplementationNode node{impl, {}};
+        auto current = nodes.begin();
+        auto end = nodes.end();
+        // std::vector<>
+        while (current != end) {
+            switch (compare(impl, current->impl)) {
+            case ImplSpan::Overlapping:
+                errors.push_back(logs::SpannedMessage{
+                    impl->location->source,
+                    impl->span.first().to(impl->traitName.span),
+                    "invalid specialization", "does not specialize an existing implementations"});
+                errors.push_back(logs::SpannedMessage{
+                    current->impl->location->source,
+                    current->impl->span.first().to(current->impl->traitName.span),
+                    "note", "this implementation is equally specific", logs::Level::Info});
+                ++current;
+                break;
+            case ImplSpan::Greater:
+                node.children.push_back(std::move(*current));
+                nodes.pop_back();
+                --end;
+                *current = *end;
+                break;
+            case ImplSpan::Lesser:
+                for (auto& error : appendTo(current->children, impl)) {
+                    errors.push_back(std::move(error));
+                }
+                return errors;
+            case ImplSpan::Equal:
+                errors.push_back(logs::SpannedMessage{
+                    impl->location->source,
+                    impl->span.first().to(impl->traitName.span),
+                    "invalid specialization", ""});
+                errors.push_back(logs::SpannedMessage{
+                    current->impl->location->source,
+                    current->impl->span.first().to(current->impl->traitName.span),
+                    "note", "this implementation is equally specific", logs::Level::Info});
+                ++current;
+                break;
+            case ImplSpan::Disjoint:
+                ++current;
+                break;
+            }
+        }
+        nodes.push_back(std::move(node));
+        return errors;
+    }
+
+    std::vector<logs::SpannedMessage> removeDuplicates() {
+        ImplementationNode newRoot{nullptr, {}};
+        std::vector<logs::SpannedMessage> errors{};
+        for (auto implementation : root.children) {
+            if (!implementation.impl->invalidBounds) {
+                for (auto& error :
+                     appendTo(newRoot.children, implementation.impl)) {
+                    errors.push_back(std::move(error));
+                }
+            }
+        }
+        root = std::move(newRoot);
+        return errors;
+    }
+
+    struct TreePrinter {
+        Source source;
+        std::vector<size_t> indices{0};
+        void operator()(ImplementationNode const& node) {
+            std::cout << logs::SpannedMessage{
+                source, node.impl->span, "level",
+                fmt::format("{}", fmt::join(indices, ", "))};
+            indices.push_back(0);
+            ranges::for_each(node.children, *this);
+            indices.pop_back();
+            ++indices.back();
+        }
+    };
+
+    void debugTree(Source source) {
+
+        TreePrinter printer{source};
+        ranges::for_each(root.children, printer);
     }
 
     // std::optional<std::tuple<Trait*, size_t>>
@@ -391,18 +904,46 @@ concept TypedNode = requires(T node) {
     { node.type } -> std::same_as<Type&>;
 };
 
-struct Module {
-    Source source;
-    ast::Program program;
-    std::string moduleId;
-    std::filesystem::path path;
-    std::unordered_map<std::string, size_t> imports;
+std::string_view packageName(std::string_view name) {
+    auto slash = std::ranges::find(name, '/');
+    return {name.begin(), slash};
+}
 
-    std::string_view packageName() const {
-        auto slash = std::ranges::find(moduleId, '/');
-        return {moduleId.begin(), slash};
-    }
-};
+std::string_view moduleName(std::string_view name) {
+    auto slash = std::ranges::find(name, ':');
+    return {name.begin(), slash};
+}
+
+// std::string findOwner(std::vector<Module*>& modules,
+// ast::FunctionDeclaration* declaration) {
+//     for (auto& mod : modules) {
+//         auto ptr = mod->program.functions.data();
+//         if (ptr <= declaration &&
+//             declaration < (ptr + mod->program.functions.size())) {
+//             return mod->moduleId;
+//         }
+//     }
+//     std::cout << "no owner" << std::endl;
+//     throw "";
+// }
+
+// std::string findOwner(ast::TypeDeclaration* declaration) {
+//     for (auto& mod : modules) {
+//         auto ptr = mod->program.typeDeclarations.data();
+//         if (ptr <= declaration &&
+//             declaration < (ptr + mod->program.typeDeclarations.size())) {
+//             return mod->moduleId;
+//         }
+//     }
+//     std::cout << "no owner" << std::endl;
+//     throw "";
+// }
+
+Type operator||(std::optional<Type> type, Type other) {
+    if (type)
+        return *type;
+    return other;
+}
 
 struct TypeChecker {
     std::unordered_map<std::string, type::BuiltIn*>& builtInTypes;
@@ -426,7 +967,92 @@ struct TypeChecker {
     Module* currentModule;
     std::vector<Module*>* modules;
 
-    std::string prepend(ast::Path const& path) {
+    logs::MessageLog log{};
+
+    template <class... Ts>
+    void logError(
+        Span span, std::string_view type, fmt::format_string<Ts...> format,
+        Ts&&... args
+    ) {
+        log.diagnostics.push_back(logs::SpannedMessage{
+            currentModule->source,
+            span,
+            type,
+            fmt::format(format, std::forward<Ts>(args)...),
+        });
+    }
+
+    template <class... Ts>
+    void logInfo(
+        Span span, std::string_view type, fmt::format_string<Ts...> format,
+        Ts&&... args
+    ) {
+        log.diagnostics.push_back(logs::SpannedMessage{
+            currentModule->source,
+            span,
+            type,
+            fmt::format(format, std::forward<Ts>(args)...),
+            logs::Level::Info,
+        });
+    }
+
+    struct FieldAccessor {
+        TypeChecker& tc;
+        ast::PropertyAccess& access;
+
+        Type operator()(type::Struct const& structure) {
+            auto prop = std::find_if(
+                structure.properties.begin(), structure.properties.end(),
+                [&](auto& field) {
+                    return field.first == access.property.value;
+                }
+            );
+            if (prop == structure.properties.end()) {
+                tc.logError(
+                    access.property.span, "error",
+                    "property {} does not exist on type {}",
+                    access.property.value, Type{type::Struct{structure}}
+                );
+                return type::Never{};
+            }
+
+            size_t index = std::distance(structure.properties.begin(), prop);
+            access.propertyIdx = index;
+            return Type{structure.properties[index].second};
+        }
+        Type operator()(type::Named const& named) {
+            if (!tc.isVisible(
+                    named.declaration, named.declaration->protoVisibility
+                )) {
+                tc.logError(
+                    spanOf(*access.lhs), "error",
+                    "prototype of {} is not accessible",
+                    Type{type::Named{named}}
+                );
+                return type::Never{};
+            }
+            std::cout << "PROTOVis " << (named.declaration->protoVisibility.level == ast::Visibility::Level::Public) << " of " <<  named.declaration->name.value << std::endl;
+            if (access.property.value == "proto") {
+                access.propertyIdx = 0;
+                return with(named.typeArguments, {}, named.declaration->proto);
+            }
+            access.namedDepth += 1;
+            return std::visit(
+                *this, with(named.typeArguments, {}, named.declaration->proto)
+            );
+        }
+
+        Type operator()(type::Never const& never) {
+            return type::Never{};
+        }
+
+        Type operator()(auto const&) {
+            tc.logError(spanOf(*access.lhs), "error", "not a struct type");
+            return type::Never{};
+        }
+    };
+
+    std::optional<std::string> prepend(ast::Path const& path) {
         auto mod = currentModule;
         std::cout << "looking in " << mod->moduleId << mod->imports.size()
                   << std::endl;
@@ -442,40 +1068,91 @@ struct TypeChecker {
                         std::cout << "available " << name << std::endl;
                     }
                 }
-                std::cout << "undeclared module " << first->value << std::endl;
-                throw "undeclared trait";
+                logError(
+                    first->span, "error", "module {} not found", first->value
+                );
+                return {};
             }
-            mod = (*modules)[import->second];
+            using Level = ast::Visibility::Level;
+            switch (import->second.second->level) {
+            case Level::Public:
+                break;
+            case Level::Internal:
+                if (currentModule->packageName() != mod->packageName()) {
+                    logError(
+                        first->span, "error", "module {} is not accessible",
+                        first->value
+                    );
+                    return {};
+                }
+                break;
+            case Level::Private:
+                if (currentModule != mod) {
+                    logError(
+                        first->span, "error", "module {} is not accessible",
+                        first->value
+                    );
+                    return {};
+                }
+                break;
+            }
+            mod = (*modules)[import->second.first];
             ++first;
         }
         return fmt::format("{}::{}", mod->moduleId, last->value);
     }
 
-    Trait resolve(ast::TraitName& traitName) {
-        auto declaration = traitScope.find(prepend(traitName.name));
+    std::optional<Trait> resolve(ast::TraitName& traitName) {
+        auto fullPath = prepend(traitName.name);
+        if (!fullPath)
+            return {};
+
+        auto declaration = traitScope.find(*fullPath);
         if (declaration == traitScope.end()) {
-            std::cout << "undeclared trait: " << traitName.name << std::endl;
-            throw "undeclared trait";
+            logError(
+                traitName.name.span, "undeclared trait", "{}", traitName.name
+            );
+            return {};
         }
         std::vector<Type> typeParams;
         for (auto& typeName : traitName.typeArgumentNames) {
-            typeParams.push_back(resolve(typeName));
+            if (auto type = resolve(typeName)) {
+                typeParams.push_back(std::move(*type));
+            } else {
+                return {};
+            }
         }
+        if (!isVisible(declaration->second)) {
+            logError(
+                traitName.name.span, "error", "trait {} is not accessible", traitName.name
+            );
+            return {};
+        };
+
         return Trait{
             declaration->second,
             std::move(typeParams),
         };
     }
 
-    Type resolve(ast::NamedType& named) {
+    std::optional<Type> resolve(ast::NamedType& named) {
         if (named.annotation) {
             return Type{builtInTypes["ptr"]};
         }
 
         if (named.name.str() == "This") {
             if (!selfType) {
-                std::cout << "self cannot be used in this context" << std::endl;
-                throw "asd";
+                logError(
+                    named.name.span, "error",
+                    "\"This\" can only be used in methods"
+                );
+                return {};
+            }
+            if (named.typeArgumentNames.size() > 0) {
+                logError(
+                    named.span, "error", "\"This\" does not take type arguments"
+                );
+                return {};
             }
             return Type{selfType.value()};
         }
@@ -493,75 +1170,115 @@ struct TypeChecker {
                 return Type{type::Parameter{true, blockTypeParameter->second}};
             }
         }
-        auto type = typeScope.find(prepend(named.name));
-        if (type == typeScope.end() && named.name.segments.size() == 1) {
-            auto builtin = builtInTypes.find(named.name.str());
-            if (builtin == builtInTypes.end() ||
-                named.typeArgumentNames.size() != 0) {
-                std::cout << "undeclared type: " << named.name.str()
-                          << std::endl;
-                throw "undeclared type";
+        auto path = prepend(named.name);
+        if (!path)
+            return {};
+        auto type = typeScope.find(*path);
+        if (type == typeScope.end()) {
+            if (named.name.segments.size() == 1) {
+                auto builtin = builtInTypes.find(named.name.str());
+                if (builtin != builtInTypes.end()) {
+                    if (named.typeArgumentNames.size() != 0) {
+                        logError(
+                            named.span, "error",
+                            "built in type {} does not take type arguments",
+                            builtin->second->name
+                        );
+                        return {};
+                    }
+                    return std::move(builtin->second);
+                }
             }
-            return std::move(builtin->second);
+            logError(named.name.span, "undeclared type", "{}", named.name);
+            return {};
         }
         std::vector<Type> typeArgs{};
-        for (auto& type : named.typeArgumentNames) {
-            typeArgs.push_back(resolve(type));
+        for (auto& typeName : named.typeArgumentNames) {
+            if (auto type = resolve(typeName)) {
+                typeArgs.push_back(std::move(*type));
+            } else {
+                return {};
+            }
         }
+        if (!isVisible(type->second)) {
+            logError(
+                named.name.span, "error", "type {} is not accessible", named.name
+            );
+            return {};
+        };
         return Type{type->second, std::move(typeArgs)};
     }
 
-    type::Tuple resolve(ast::TupleType& tuple) {
+    std::optional<type::Tuple> resolve(ast::TupleType& tuple) {
         std::vector<Type> fieldTypes{};
         for (auto& fieldType : tuple.fields) {
-            fieldTypes.push_back(this->resolve(fieldType));
+            if (auto type = resolve(fieldType)) {
+                fieldTypes.push_back(std::move(*type));
+            } else {
+                return {};
+            }
         }
         return type::Tuple{std::move(fieldTypes)};
     }
 
-    type::Struct resolve(ast::StructType& structure) {
+    std::optional<type::Struct> resolve(ast::StructType& structure) {
         std::vector<std::pair<std::string, Type>> fieldTypes{};
         for (auto& property : structure.properties) {
-            fieldTypes.push_back(
-                {std::move(property.name), this->resolve(property.typeName)}
-            );
+            if (auto type = resolve(property.typeName)) {
+                fieldTypes.push_back({std::move(property.name), *type});
+            } else {
+                return {};
+            }
         }
         std::ranges::sort(fieldTypes, {}, &std::pair<std::string, Type>::first);
         return type::Struct{std::move(fieldTypes)};
     }
 
-    Type resolve(ast::VectorType& vector) {
-        return type::Named{
-            typeScope["std::Vector"], {resolve(*vector.elementType)}};
+    std::optional<Type> resolve(ast::VectorType& vector) {
+        if (auto elementType = resolve(*vector.elementType)) {
+            return type::Named{typeScope["std::Vector"], {*elementType}};
+        }
+        return {};
     }
 
-    Type resolve(ast::TypeName& typeName) {
+    std::optional<Type> resolve(ast::TypeName& typeName) {
         return std::visit(
-            [this](auto& name) -> Type { return resolve(name); }, typeName.value
+            [this](auto& name) -> std::optional<Type> { return resolve(name); },
+            typeName.value
         );
     }
 
     void save(ast::TraitImplementation& traitImplementation) {
+        traitImplementation.location = currentModule;
         size_t i = 0;
         for (auto& [_, parameter, bounds] :
              traitImplementation.typeParameterNames) {
             blockTypeParameters[parameter.value] = i;
-            for (auto& trait : bounds) {
-                traitImplementation.traitBounds.push_back(
-                    {Type{type::Parameter{true, i}}, resolve(trait)}
-                );
+            for (auto& traitName : bounds) {
+                if (auto trait = resolve(traitName)) {
+                    traitImplementation.traitBounds.push_back(
+                        {Type{type::Parameter{true, i}}, std::move(*trait)}
+                    );
+                } else {
+                    traitImplementation.invalidBounds = true;
+                }
             }
             ++i;
         }
         selfType = Type{traitImplementation.type};
 
-        traitImplementation.trait = resolve(traitImplementation.traitName);
-        traitImplementation.type = resolve(traitImplementation.typeName);
+        auto trait = resolve(traitImplementation.traitName);
+        auto type = resolve(traitImplementation.typeName);
 
-        implementationScope.push_back(&traitImplementation);
+        if (trait && type) {
+            traitImplementation.trait = *trait;
+            traitImplementation.type = *type;
+            implementationScope.root.children.push_back(
+                {&traitImplementation, {}}
+            );
+        }
 
         blockTypeParameters.clear();
-
         selfType.reset();
     }
 
@@ -578,11 +1295,9 @@ struct TypeChecker {
             [](auto const& decl) { return decl.name.value; }
         );
 
-        std::cout << "hmmuu " << scope.size() << std::endl;
         scope.enter();
         scope.add("this", *selfType, false);
 
-        std::cout << "hmm " << scope.size() << std::endl;
         std::ranges::for_each(
             traitImplementation.implementations,
             [&](ast::FunctionDeclaration& func) {
@@ -593,46 +1308,43 @@ struct TypeChecker {
             traitImplementation.implementations,
             [this](auto& arg) { (*this)(arg); }
         );
-        std::cout << "hmm 2" << std::endl;
         scope.exit(controlFlowDepth);
-        std::cout << "hmm 3" << std::endl;
 
-        if (traitImplementation.implementations.size() !=
-            traitImplementation.trait.declaration->signatures.size()) {
-            throw "invalid number of functions in impl";
-            std::cout << "invalid number of functions in impl" << std::endl;
-        }
-
-        std::cout << "hmm 3" << std::endl;
-        for (size_t i = 0; i < traitImplementation.implementations.size();
-             ++i) {
-            auto& fromTrait =
-                traitImplementation.trait.declaration->signatures.at(i);
-            auto& provided = traitImplementation.implementations.at(i);
-
-            std::cout << "so we begin checking" << std::endl;
-
-            if (fromTrait.name.value != provided.name.value) {
-                fmt::println(
-                    "mismatched name: {} {}", fromTrait.name, provided.name
+        for (auto& signature :
+             traitImplementation.trait.declaration->signatures) {
+            auto providedPtr = ranges::find(
+                traitImplementation.implementations, signature.name.value,
+                [](auto const& fun) { return fun.name.value; }
+            );
+            if (providedPtr == traitImplementation.implementations.end()) {
+                logError(
+                    traitImplementation.traitName.span, "missing function",
+                    "definition of {} is required by {}", signature.name,
+                    traitImplementation.traitName
                 );
-                throw "mismatched name";
+                continue;
             }
-            std::cout << "so we 1" << std::endl;
+            auto& provided = *providedPtr;
 
-            if (fromTrait.parameters.size() != provided.parameters.size()) {
-                std::cout << "mismatched param count" << std::endl;
-                throw "mismatched param count";
+            if (signature.parameters.size() != provided.parameters.size()) {
+                logError(
+                    static_cast<ast::Signature&>(provided).span,
+                    "invalid parameter count",
+                    "expected {} parameters, found {}",
+                    signature.parameters.size(), provided.parameters.size()
+                );
             }
-            std::cout << "so we 2 " << fromTrait.parameters.size() << std::endl;
 
-            if (fromTrait.typeParameterNames.size() !=
+            if (signature.typeParameterNames.size() !=
                 provided.typeParameterNames.size()) {
-                throw "mismatched type param count";
-                std::cout << "mismatched type param count" << std::endl;
+                logError(
+                    static_cast<ast::Signature&>(provided).span,
+                    "invalid number of type parameters",
+                    "expected {} type parameters, found {}",
+                    signature.typeParameterNames.size(),
+                    provided.typeParameterNames.size()
+                );
             }
-            std::cout << "so we 3" << fromTrait.typeParameterNames.size()
-                      << std::endl;
 
             std::vector<Type> typeArguments{};
             for (size_t j = 0; j < provided.typeParameterNames.size(); ++j) {
@@ -641,27 +1353,33 @@ struct TypeChecker {
                     j,
                 });
             }
+
             auto traitTypeArgs = traitImplementation.trait.typeArguments;
             traitTypeArgs.push_back(Type{traitImplementation.type});
-            for (size_t j = 0; j < fromTrait.parameters.size(); ++j) {
-                auto withe = with(
-                    traitTypeArgs, typeArguments, fromTrait.parameters[j].type
-                );
-                std::cout << "so we checking cd" << j << std::endl;
-                if (withe != provided.parameters[j].type) {
-                    std::cout << "mismatched arg type" << std::endl;
-                    throw "mismatched arg type";
+            for (auto&& [expected, found] :
+                 views::zip(signature.parameters, provided.parameters)) {
+                auto translated =
+                    with(traitTypeArgs, typeArguments, expected.type);
+                if (!found.type.isAssignableTo(translated)) {
+                    logError(
+                        spanOf(found.typeName), "invalid parameter type",
+                        "expected {}, found {}", translated, found.typeName
+                    );
                 }
             }
-            std::cout << "so we 4" << std::endl;
 
-            if (with(traitTypeArgs, typeArguments, fromTrait.returnType) !=
-                provided.returnType) {
-                std::cout << "mismatched return type" << std::endl;
-                throw "mismatched return type";
+            auto returnType =
+                with(traitTypeArgs, typeArguments, signature.returnType);
+            if (!provided.returnType.isAssignableTo(returnType)) {
+                logError(
+                    provided.returnTypeName ? spanOf(*provided.returnTypeName)
+                                            : spanOf(provided.body).first(),
+                    "invalid return type", "expected {}, found {}", returnType,
+                    provided.returnType
+                );
             }
-            std::cout << "so we done checking" << std::endl;
         }
+
         selfType.reset();
         blockTypeParameters.clear();
     }
@@ -671,10 +1389,12 @@ struct TypeChecker {
         for (auto& [_, parameter, bounds] :
              traitDeclaration.typeParameterNames) {
             blockTypeParameters[parameter.value] = i;
-            for (auto& trait : bounds) {
-                traitDeclaration.traitBounds.push_back(
-                    {Type{type::Parameter{true, i}}, resolve(trait)}
-                );
+            for (auto& traitName : bounds) {
+                if (auto trait = resolve(traitName)) {
+                    traitDeclaration.traitBounds.push_back(
+                        {Type{type::Parameter{true, i}}, std::move(*trait)}
+                    );
+                }
             }
             ++i;
         }
@@ -701,29 +1421,34 @@ struct TypeChecker {
             ++i;
         }
 
-        typeDeclaration.proto = resolve(typeDeclaration.protoName);
+        auto proto = resolve(typeDeclaration.protoName);
+        typeDeclaration.proto = proto ? *proto : type::Never{};
 
         blockTypeParameters.clear();
     }
 
     void operator()(ast::Signature& function) {
+        function.location = currentModule;
         size_t i = 0;
         for (auto& [_, parameter, bounds] : function.typeParameterNames) {
             typeParameters[parameter.value] = i;
-            for (auto& trait : bounds) {
-                function.traitBounds.push_back(
-                    {Type{type::Parameter{false, i}}, resolve(trait)}
-                );
+            for (auto& traitName : bounds) {
+                if (auto trait = resolve(traitName)) {
+                    function.traitBounds.push_back(
+                        {Type{type::Parameter{true, i}}, std::move(*trait)}
+                    );
+                }
             }
             ++i;
         }
 
-        function.returnType = function.returnTypeName
-                                  ? resolve(function.returnTypeName.value())
-                                  : Type{builtInTypes["null"]};
+        function.returnType =
+            function.returnTypeName
+                ? resolve(function.returnTypeName.value()) || type::Never{}
+                : Type{builtInTypes["null"]};
 
         for (auto& parameter : function.parameters) {
-            parameter.type = resolve(parameter.typeName);
+            parameter.type = resolve(parameter.typeName) || type::Never{};
         }
 
         typeParameters.clear();
@@ -738,7 +1463,6 @@ struct TypeChecker {
             return;
         }
 
-        std::cout << "will check " << function.name.value << std::endl;
         size_t i = 0;
         for (auto& [_, parameter, __] : function.typeParameterNames) {
             typeParameters[parameter.value] = i;
@@ -746,43 +1470,77 @@ struct TypeChecker {
         }
         scope.enter();
         for (auto& parameter : function.parameters) {
-            std::cout << "adding to scope" << std::endl;
             scope.add(parameter.name.value, parameter.type, false);
-            std::cout << "added to scope" << std::endl;
         }
         implementationScope.currentBounds.local = &function.traitBounds;
         currentReturnType = function.returnType;
-        std::cout << "tc body... " << function.name.value << std::endl;
         auto returnType = (*this)(function.body);
-        std::cout << "tc body done " << function.name.value << std::endl;
 
         scope.exit(controlFlowDepth);
 
         if (function.returnType != returnType && !isNever(returnType)) {
-            std::cout << "mismtch in " << function.name.value << ": expected "
-                      << function.returnType << " got " << returnType
-                      << std::endl;
-            fmt::println("{}", function.body);
-            throw "type error - mismatched return type";
+            logError(
+                spanOf(function.body), "invalid return type",
+                "expected {}, found {}", function.returnType, returnType
+            );
+            if (function.returnTypeName) {
+                logInfo(
+                    spanOf(*function.returnTypeName), "note",
+                    "{} declared here", function.returnType
+                );
+            }
         }
 
         typeParameters.clear();
-        std::cout << "returning..." << function.name.value << std::endl;
+    }
+
+    Type chainType;
+
+    std::pair<ast::Expression, Type>
+    subsituteOverloadedOperator(ast::Binary<"==">&& binary) {
+        return std::visit(
+            match{
+                [&](ast::Binary<"==">& eq) -> std::pair<ast::Expression, Type> {
+                    auto [newExpr, _] =
+                        subsituteOverloadedOperator(std::move(eq));
+                    auto rhs = (*this)(*binary.rhs);
+                    binary.lhs.reset();
+                    auto [newExpr2, resType] = subsituteOverloadedOperator(
+                        std::move(binary), Type{chainType}, Type{rhs}
+                    );
+                    chainType = rhs;
+                    return {
+                        ast::Expression{ast::Binary<"&&">{
+                            Span{}, std::move(newExpr), std::move(newExpr2)}},
+                        &type::boolean};
+                },
+                [&](auto&) {
+                    auto lhs = (*this)(*binary.lhs);
+                    auto rhs = (*this)(*binary.rhs);
+                    chainType = rhs;
+                    return subsituteOverloadedOperator(
+                        std::move(binary), std::move(lhs), std::move(rhs)
+                    );
+                },
+            },
+            binary.lhs->value
+        );
     }
 
     template <String op>
-    ast::Expression subsituteOverloadedOperator(ast::Binary<op>&& binary) {
+    std::pair<ast::Expression, Type>
+    subsituteOverloadedOperator(ast::Binary<op>&& binary) {
         return subsituteOverloadedOperator(
             std::move(binary), (*this)(*binary.lhs), (*this)(*binary.rhs)
         );
     }
 
     template <String op>
-    ast::Expression subsituteOverloadedOperator(
+    std::pair<ast::Expression, Type> subsituteOverloadedOperator(
         ast::Binary<op>&& binary, Type&& lhsType, Type&& rhsType
     ) {
         if (isNever(lhsType) || isNever(rhsType)) {
-            return binary;
+            return {std::move(binary), type::Never{}};
         }
 
         static constexpr std::string_view traitName =
@@ -792,64 +1550,96 @@ struct TypeChecker {
             )
                 ->second;
 
-        fmt::println("ONE {}", op.characters);
-        std::cout << rhsType << lhsType << std::endl;
-        fmt::println("ONE {}", op.characters);
+        if (std::holds_alternative<type::BuiltIn*>(lhsType) &&
+            std::holds_alternative<type::BuiltIn*>(rhsType)) {
+            if (lhsType != rhsType) {
+                logError(
+                    binary.span, "invalid operands",
+                    "built in operator {} requires the same type on both sides",
+                    op.characters
+                );
+                logInfo(
+                    spanOf(*binary.lhs), "note",
+                    "left hand side of type {} here", lhsType
+                );
+                logInfo(
+                    spanOf(*binary.rhs), "note",
+                    "right hand side of type {} here", rhsType
+                );
+                return {std::move(binary), type::Never{}};
+            }
+
+            auto type = check(binary, lhsType);
+            binary.type = type;
+            return {std::move(binary), type};
+        }
+
         if (!implementationScope.areSatisfied(
                 {{Type{lhsType},
                   Trait{traitScope[std::string{traitName}], {Type{rhsType}}}}}
             )) {
-            fmt::println("No.");
-            throw "";
+            logError(
+                binary.span, "invalid operands",
+                "types {} and {} do not overload the {} operator", lhsType,
+                rhsType, op.characters
+            );
         }
 
-        if (lhsType == builtInTypes["int"] && rhsType == builtInTypes["int"]) {
-            fmt::println("built in op");
-            return binary;
-        }
-
+        std::cout << binary.rhs.get() << std::endl;
         std::vector<ast::Expression> args{};
         args.push_back(std::move(*binary.rhs));
-        return ast::Call{
-            Span{},
-            ast::Expression{ast::PropertyAccess{
-                Span{},
-                std::move(binary.lhs),
-                {},
-                0,
-                0,
-            }},
-            {},
-            {std::move(args)},
-            {TraitMethodRef{
-                Trait{traitScope[std::string{traitName}], {Type{rhsType}}}}},
+        auto ref = TraitMethodRef{
+            Trait{traitScope[std::string{traitName}], {Type{rhsType}}}};
+        std::cout << binary.lhs.get() << std::endl;
+        // struct PropertyAccess {
+        //     Span span;
+        //     UPtr<Expression> lhs;
+        //     std::optional<TraitName> traitName;
+        //     lexer::Identifier property;
+
+        //     size_t propertyIdx;
+        //     size_t namedDepth;
+        //     Type type;
+        // };
+        auto access = ast::PropertyAccess{
+            Span{}, std::move(binary.lhs), {}, {}, 0, 0,
         };
+        auto expr = ast::Expression{std::move(access)};
+        auto call = ast::Call{
+            Span{}, std::move(expr), {}, {std::move(args)}, {std::move(ref)},
+        };
+
+        fmt::println("lets check call");
+        auto resolvedReturnType = checkCall(
+            traitScope[std::string{traitName}]->signatures[0], call,
+            {rhsType, lhsType}, {}
+        );
+        fmt::println("done with check call");
+        call.type = resolvedReturnType;
+        return {std::move(call), std::move(resolvedReturnType)};
     }
 
-    ast::Expression subsituteOverloadedOperator(ast::Binary<"=">&& expression) {
-        return expression;
-    }
-    ast::Expression subsituteOverloadedOperator(auto&& expression) {
-        return expression;
+    std::pair<ast::Expression, Type>
+    subsituteOverloadedOperator(ast::Binary<"=">&& expression) {
+        auto type = (*this)(expression);
+        return {std::move(expression), type};
     }
 
     Type operator()(ast::Expression& expression) {
-        expression = std::visit(
-            [this](auto& expr) {
-                return subsituteOverloadedOperator(std::move(expr));
-            },
-            expression.value
-        );
-        std::cout << "will REsolve " << expression.value.index() << std::endl;
-        expression = std::visit(
-            [this](auto& expr) {
-                return resolveVariableOrTypeExpression(std::move(expr));
-            },
-            expression.value
-        );
-        static_assert(TypedNode<ast::VectorLiteral>);
         auto type = std::visit(
             match{
+                [&](ast::Variable& expr) {
+                    auto [newExpr, type] =
+                        resolveVariableOrTypeExpression(std::move(expr));
+                    expression = std::move(newExpr);
+                    return type;
+                },
+                [&]<String op>(ast::Binary<op>& expr) {
+                    auto [newExpr, type] =
+                        subsituteOverloadedOperator(std::move(expr));
+                    expression = std::move(newExpr);
+                    return type;
+                },
                 [this](auto& expr) { return (*this)(expr); },
                 [this](TypedNode auto& expr) {
                     auto type = (*this)(expr);
@@ -871,56 +1661,159 @@ struct TypeChecker {
         return check(binary);
     }
 
-    Type check(ast::Binary<"+">& addition) {
+    Type check(ast::Binary<"+">& addition, Type const& type) {
+        if (type == &type::integer) {
+            return &type::integer;
+        }
 
-        return Type{builtInTypes["int"]};
+        if (type == &type::floating) {
+            return &type::floating;
+        }
+
+        logError(
+            addition.span, "invalid operands",
+            "operator + only accepts int or float operands, found {}", type
+        );
+        return type::Never{};
     }
 
-    Type check(ast::Binary<"==">& equate) {
-        // auto lhsType = (*this)(*equate.lhs);
-        // auto rhsType = (*this)(*equate.rhs);
-        //     fmt::println("THREE");
-
-        return Type{builtInTypes["bool"]};
+    Type check(ast::Binary<"==">& equate, Type const& type) {
+        return &type::boolean;
     }
 
-    Type check(ast::Binary<"&&">& op) {
-        fmt::println("not supported");
-        throw "";
+    Type check(ast::Binary<"&&">& op, Type const& type) {
+        if (type != &type::boolean) {
+            logError(
+                op.span, "invalid operands",
+                "operator && only accepts boolean operands, found {}", type
+            );
+            return type::Never{};
+        }
+
+        return &type::boolean;
     }
 
-    Type check(ast::Binary<("||")>& op) {
-        fmt::println("not supported");
-        throw "";
+    Type check(ast::Binary<"||">& op, Type const& type) {
+        if (type != &type::boolean) {
+            logError(
+                op.span, "invalid operands",
+                "operator || only accepts boolean operands, found {}", type
+            );
+            return type::Never{};
+        }
+
+        return &type::boolean;
     }
 
-    Type check(ast::Binary<"<=">& op) {
-        fmt::println("not supported");
-        throw "";
+    Type check(ast::Binary<"<=">& op, Type const& type) {
+        if (type != &type::integer && type != &type::character &&
+            type != &type::floating) {
+            logError(
+                op.span, "invalid operands",
+                "operator <= only accepts int, float or char operands, found "
+                "{}",
+                type
+            );
+            return type::Never{};
+        }
+
+        return &type::boolean;
     }
 
-    Type check(ast::Binary<">=">& op) {
-        fmt::println("not supported");
-        throw "";
+    Type check(ast::Binary<">=">& op, Type const& type) {
+        if (type != &type::integer && type != &type::ptr &&
+            type != &type::character && type != &type::floating) {
+            logError(
+                op.span, "invalid operands",
+                "operator >= only accepts int, float or char operands, found "
+                "{}",
+                type
+            );
+            return type::Never{};
+        }
+
+        return &type::boolean;
+        ;
     }
 
-    Type check(ast::Binary<">">& op) {
-        fmt::println("not supported");
-        throw "";
+    Type check(ast::Binary<">">& op, Type const& type) {
+        if (type != &type::integer && type != &type::ptr &&
+            type != &type::character && type != &type::floating) {
+            logError(
+                op.span, "invalid operands",
+                "operator > only accepts int, float or char operands, found {}",
+                type
+            );
+            return type::Never{};
+        }
+
+        return &type::boolean;
     }
 
-    Type check(ast::Binary<"-">& op) {
-        fmt::println("not supported");
-        throw "";
+    Type check(ast::Binary<"<">& op, Type const& type) {
+        if (type != &type::integer && type != &type::ptr &&
+            type != &type::character && type != &type::floating) {
+            logError(
+                op.span, "invalid operands",
+                "operator < only accepts int, float or char operands, found {}",
+                type
+            );
+            return type::Never{};
+        }
+
+        return &type::boolean;
     }
 
-    Type check(ast::Binary<"<">& op) {
-        return builtInTypes["bool"];
+    Type check(ast::Binary<"-">& op, Type const& type) {
+        if (type == &type::integer) {
+            return &type::integer;
+        }
+
+        if (type == &type::floating) {
+            return &type::floating;
+        }
+
+        logError(
+            op.span, "invalid operands",
+            "operator - only accepts int or float operands, found {}", type
+        );
+        return type::Never{};
     }
 
-    Type check(ast::Binary<"/">& op) {
-        fmt::println("not supported");
-        throw "";
+    Type check(ast::Binary<"/">& op, Type const& type) {
+        if (type == &type::integer) {
+            return &type::integer;
+        }
+
+        if (type == &type::floating) {
+            return &type::floating;
+        }
+
+        logError(
+            op.span, "invalid operands",
+            "operator / only accepts int or float operands, found {}", type
+        );
+        return type::Never{};
+    }
+
+    Type check(ast::Binary<"!=">& notEquals, Type const& type) {
+        return &type::boolean;
+    }
+
+    Type check(ast::Binary<"*">& multiplication, Type const& type) {
+        if (type == &type::integer) {
+            return &type::integer;
+        }
+
+        if (type == &type::floating) {
+            return &type::floating;
+        }
+
+        logError(
+            multiplication.span, "invalid operands",
+            "operator * only accepts int or float operands, found {}", type
+        );
+        return type::Never{};
     }
 
     Type operator()(ast::Cast& cast) {
@@ -942,8 +1835,10 @@ struct TypeChecker {
     Type operator()(ast::Match& match) {
         auto type = (*this)(*match.scrutinee);
         if (match.body.size() == 0) {
-            fmt::println("match body cannot be empty");
-            throw "";
+            logError(
+                match.span, "error", "body of match expression cannot be empty"
+            );
+            return type::Never{};
         }
 
         std::optional<Type> result = type::Never{};
@@ -961,28 +1856,29 @@ struct TypeChecker {
         return result ? *result : builtInTypes["null"];
     }
 
+    Type operator()(lexer::CharLiteral& character) {
+        return builtInTypes["char"];
+    }
+
     Type operator()(lexer::FloatLiteral& cast) {
-        fmt::println("not supported");
-        throw "";
+        return builtInTypes["float"];
     }
 
     Type operator()(lexer::StringLiteral& cast) {
-        fmt::println("not supported");
-        throw "";
+        return type::Named{typeScope["std::String"], {}};
     }
 
     Type operator()(ast::IndexAccess& access) {
         auto lhs = (*this)(*access.lhs);
         auto index = (*this)(*access.index);
         type::Named* type = std::get_if<type::Named>(&lhs);
+        if (!isNever(index) && index != builtInTypes["int"]) {
+            logError(access.span, "error", "index must be an integer type");
+        }
         if (!isNever(lhs) &&
             (!type || type->declaration != typeScope["std::Vector"])) {
-            std::cout << "canot index non vec, got " << lhs.index();
-            throw "";
-        }
-        if (!isNever(index) && index != builtInTypes["int"]) {
-            fmt::println("canot index with non int");
-            throw "";
+            logError(access.span, "error", "only vectors can be indexed");
+            return type::Never{};
         }
         if (isNever(index) || isNever(lhs)) {
             return type::Never{};
@@ -995,42 +1891,63 @@ struct TypeChecker {
         auto type = _return.value ? (*this)(*_return.value)
                                   : Type{builtInTypes["null"]};
         if (type != currentReturnType) {
-            fmt::println("wrong return type");
-            throw "";
+            logError(
+                _return.value ? spanOf(*_return.value) : _return.span,
+                "invalid return type", "expected {}, found {}",
+                currentReturnType, type
+            );
         }
         return type::Never{};
     }
 
     Type operator()(ast::Break& _break) {
-        if (!breakTypes) {
-            fmt::println("invalid ctx");
-            throw "";
+        if (breakTypes) {
+            breakTypes->push_back(
+                _break.value ? (*this)(*_break.value) : builtInTypes["null"]
+            );
+        } else {
+            logError(
+                _break.span, "error", "break cannot be used outside of a loop"
+            );
         }
-        breakTypes->push_back(
-            _break.value ? (*this)(*_break.value) : builtInTypes["null"]
-        );
         return type::Never{};
     }
 
     Type operator()(ast::Continue& _continue) {
         if (!breakTypes) {
-            fmt::println("invalid ctx");
-            throw "";
+            breakTypes->push_back(
+                _continue.value ? (*this)(*_continue.value)
+                                : builtInTypes["null"]
+            );
+        } else {
+            logError(
+                _continue.span, "error",
+                "break cannot be used outside of a loop"
+            );
         }
-        breakTypes->push_back(
-            _continue.value ? (*this)(*_continue.value) : builtInTypes["null"]
-        );
         return type::Never{};
     }
 
     Type operator()(ast::Prefix<"-">& op) {
-        fmt::println("not supported");
-        throw "";
+        auto type = (*this)(*op.rhs);
+        if (type != &type::boolean) {
+            logError(
+                op.span, "invalid operand",
+                "operator - only accepts int or float operands, found {}", type
+            );
+        }
+        return type::Never{};
     }
 
     Type operator()(ast::Prefix<"!">& op) {
-        fmt::println("not supported");
-        throw "";
+        auto type = (*this)(*op.rhs);
+        if (type != &type::boolean) {
+            logError(
+                op.span, "invalid operand",
+                "operator ! only accepts a boolean operand, found {}", type
+            );
+        }
+        return &type::boolean;
     }
 
     Type operator()(ast::VectorElement& element) {
@@ -1044,22 +1961,30 @@ struct TypeChecker {
 
         type::Named* spreadee = std::get_if<type::Named>(&spreadeeType);
         if (!spreadee || spreadee->declaration != typeScope["std::Vector"]) {
-            fmt::println("spread must target a vector");
-            throw "";
+            logError(
+                spread.span, "invalid operand",
+                "operator .. only accepts a vector operand, found {}",
+                spreadeeType
+            );
+            return type::Never{};
         }
         return std::move(spreadee->typeArguments[0]);
     }
 
-    Type operator()(ast::VectorLiteral& op) {
+    Type operator()(ast::VectorLiteral& vector) {
         Type elementType = std::visit(
             match{
                 [this](ast::VectorElementType& type) {
-                    return resolve(type.typeName);
+                    return resolve(type.typeName) || type::Never{};
                 },
-                [this](ast::VectorElements& elements) {
+                [&](ast::VectorElements& elements) -> Type {
                     if (elements.elements.size() == 0) {
-                        fmt::println("vec cannot be empty");
-                        throw "";
+                        logError(
+                            vector.span, "error",
+                            "empty vector literals must specify the element "
+                            "type"
+                        );
+                        return type::Never{};
                     }
                     Type firstElementType = (*this)(elements.elements[0]);
                     for (auto& element :
@@ -1067,41 +1992,32 @@ struct TypeChecker {
                         auto type = (*this)(element);
                         if (!isNever(firstElementType) && !isNever(type) &&
                             type != firstElementType) {
-                            fmt::println("invalid elem type");
-                            throw "";
+                            logError(
+                                spanOf(element), "invalid element type",
+                                "expected type {}, found", firstElementType,
+                                type
+                            );
+                            logInfo(
+                                spanOf(elements.elements[0]), "note",
+                                "type {} inferred here", firstElementType
+                            );
                         }
                     }
                     return firstElementType;
                 },
             },
-            op.content
+            vector.content
         );
-        op.elementType = Type{elementType};
-        std::cout << "LIT type " << elementType << std::endl;
+        vector.elementType = Type{elementType};
         return type::Named{typeScope["std::Vector"], {std::move(elementType)}};
     }
 
-    Type check(ast::Binary<"!=">& notEquals) {
-        // auto lhsType = (*this)(*notEquals.lhs);
-        // auto rhsType = (*this)(*notEquals.rhs);
-        // fmt::println("FOUR");
-        // if (!implementationScope.areSatisfied(
-        //         {{Type{lhsType}, Trait{traitScope["Neq"], {Type{rhsType}}}}}
-        //     )) {
-        //     throw "";
-        // }
-        // notEquals.methodRef = TraitMethodRef{
-        //     Type{lhsType}, Trait{traitScope["Neq"], {Type{rhsType}}}};
-        return Type{builtInTypes["bool"]};
-    }
-
-    Type check(ast::Binary<"*">& multiplication) {
-        return builtInTypes["int"];
-    }
-
-    Type tryWriteTo(auto&) {
-        std::cout << "invalid assignment target - non vec " << std::endl;
-        throw "";
+    Type tryWriteTo(auto& target) {
+        logError(
+            spanOf(target), "invalid assignment",
+            "only expressions refering to a modifiable lvalue may be assigned"
+        );
+        return type::Never{};
     }
 
     Type tryWriteTo(ast::IndexAccess& access) {
@@ -1109,14 +2025,13 @@ struct TypeChecker {
         Type idxType = (*this)(*access.index);
         type::Named* type = std::get_if<type::Named>(&lhsType);
         type::BuiltIn** idx = std::get_if<type::BuiltIn*>(&idxType);
+        if (!isNever(idxType) && (!idx || *idx != builtInTypes["int"])) {
+            logError(access.span, "error", "index must be an integer type");
+        }
         if (!isNever(lhsType) &&
             (!type || type->declaration != typeScope["std::Vector"])) {
-            std::cout << "invalid assignment target - non vec 2" << std::endl;
-            throw "";
-        }
-        if (!isNever(idxType) && (!idx || *idx != builtInTypes["int"])) {
-            std::cout << "invalid index type for vec " << std::endl;
-            throw "";
+            logError(access.span, "error", "only vectors can be indexed");
+            return type::Never{};
         }
         if (isNever(idxType) || isNever(lhsType)) {
             return type::Never{};
@@ -1128,7 +2043,7 @@ struct TypeChecker {
     Type tryWriteTo(ast::PropertyAccess& access) {
         Type lhsType = tryWriteTo(*access.lhs);
         access.namedDepth = 0;
-        return std::visit(FieldAccessor{access}, lhsType);
+        return std::visit(FieldAccessor{*this, access}, lhsType);
     }
 
     Type tryWriteTo(ast::TupleFieldAccess& access) {
@@ -1139,9 +2054,13 @@ struct TypeChecker {
                     return Type{tuple.fields[access.propertyIdx]};
                 },
                 [&](type::Never const&) -> Type { return type::Never{}; },
-                [](auto const&) -> Type {
-                    std::cout << "field write on non-tuple" << std::endl;
-                    throw "field write on non-tuple";
+                [&](auto const&) -> Type {
+                    logError(
+                        spanOf(*access.lhs), "error",
+                        "expected tuple type as field access operand, found {}",
+                        lhsType
+                    );
+                    return type::Never{};
                 },
             },
             lhsType
@@ -1149,22 +2068,33 @@ struct TypeChecker {
     }
 
     Type tryWriteTo(ast::Variable& variable) {
-        if (variable.name.segments.size() != 1) {
-            std::cout << "unexpected path";
-            throw "";
+        if (variable.name.segments.size() > 1) {
+            logError(
+                variable.span, "error",
+                "variables must reference the current module"
+            );
+            return type::Never{};
         }
 
         auto index = scope[variable.name.str()];
         if (!index) {
-            std::cout << "undeclared variable";
-            throw "";
+            logError(
+                variable.span, "undeclared variable",
+                "{} was not found in the current scope", variable.name.str()
+            );
+            return type::Never{};
         }
         variable.binding = index.value();
         if (scope[variable.binding].isMutable) {
             return scope[variable.binding].type;
         }
-        std::cout << "assignment to immutable";
-        throw "";
+        logError(
+            variable.span, "invalid assignment", "{} is a constant",
+            variable.name.str()
+        );
+        return scope[variable.binding].type;
+        // logInfo(variable.span, "note", "declared immutable here",
+        // variable.name.str());
     }
 
     Type tryWriteTo(ast::Expression& expression) {
@@ -1187,48 +2117,48 @@ struct TypeChecker {
         Type lhsType = (*this)(*assignment.lhs);
         tryWriteTo(*assignment.lhs);
         if (lhsType != rhsType && !isNever(lhsType) && !isNever(rhsType)) {
-            std::cout << "invalid assignment - mismatched types";
-            throw "";
+            logError(
+                assignment.span, "invalid assignment",
+                "type {} is not assignable to {}", lhsType, rhsType
+            );
         }
         return std::move(lhsType);
     }
 
-    ast::Expression resolveVariableOrTypeExpression(auto&& expr) {
-        return expr;
-    }
-
-    ast::Expression resolveVariableOrTypeExpression(ast::Variable&& variable) {
+    std::pair<ast::Expression, Type>
+    resolveVariableOrTypeExpression(ast::Variable&& variable) {
         if (variable.name.str() == "") {
-            return variable;
+            auto type = (*this)(variable);
+            return {std::move(variable), type};
         }
 
-        if (variable.name.str() == "T") {
-            fmt::println("noww T");
-        }
         if (!scope[variable.name.str()]) {
-            if (variable.name.str() == "T") {
-                fmt::println("noww T not found");
-            }
             ast::NamedType typeName{Span{}, {}, variable.name, {}};
-            return ast::TypeExpression{
+            auto texpr = ast::TypeExpression{
                 Span{},
                 ast::TypeName{std::move(typeName)},
                 {},
             };
+            auto type = (*this)(texpr);
+            return {std::move(texpr), type};
         }
-        return variable;
+        auto type = (*this)(variable);
+        return {std::move(variable), type};
     }
 
     Type operator()(ast::TypeExpression& typeExpression) {
-        typeExpression.theType = resolve(typeExpression.value);
+        typeExpression.theType = resolve(typeExpression.value) || type::Never{};
         return type::Named{typeScope["Type"], {}};
     }
 
     Type operator()(ast::Variable& variable) {
         std::cout << "ENTER var" << std::endl;
-        if (variable.name.segments.size() != 1) {
-            std::cout << "unexpected path";
-            throw "";
+        if (variable.name.segments.size() > 1) {
+            logError(
+                variable.span, "error",
+                "variables must reference the current module"
+            );
+            return type::Never{};
         }
         if (variable.name.str() == "") {
             std::cout << "'SVAR " << variable.binding << " "
@@ -1243,18 +2173,19 @@ struct TypeChecker {
                 variable.binding = 0;
                 return Type{selfType.value()};
             }
-            std::cout << "'this' cannot be used in this context" << std::endl;
-            throw "undefined variable";
+            logError(
+                variable.span, "error", "this can only be used within methods"
+            );
+            return type::Never{};
         }
 
         auto binding = scope[variable.name.str()];
         if (!binding) {
-            std::cout << logs::SpannedMessage{
-                currentModule->source, variable.name.span,
-                "undeclared variable", variable.name.str()};
-            std::cout << "undeclared variable " << variable.name.str()
-                      << std::endl;
-            throw "undefined variable";
+            logError(
+                variable.span, "undeclared variable",
+                "{} was not found in the current scope", variable.name.str()
+            );
+            return type::Never{};
         }
         variable.binding = *binding;
         fmt::println("foundee {} {}", variable.binding, scope.bindings.size());
@@ -1316,12 +2247,19 @@ struct TypeChecker {
         if (!structure.name) {
             return literalType;
         }
-        type::Named type =
-            std::get<type::Named>(resolve(structure.name.value()));
+
+        auto named = resolve(structure.name.value());
+        if (!named) {
+            return type::Never{};
+        }
+        type::Named type = std::get<type::Named>(*named);
 
         if (type.declaration->proto != literalType) {
-            std::cout << "invalid proto" << std::endl;
-            throw "";
+            logError(
+                structure.span, "error",
+                "type {} does not match the prototype of type {}", literalType,
+                *named
+            );
         }
         structure.namedType = type;
         return type;
@@ -1341,14 +2279,18 @@ struct TypeChecker {
             (*this)(pattern.body, type);
             if (pattern.guard) {
                 if (!allowGuards) {
-                    std::cout << "this pattern cannot fail" << std::endl;
-                    throw "";
+                    check.logError(
+                        spanOf(*pattern.guard), "error",
+                        "guards are not allowed in this context"
+                    );
                 }
 
-                if (check(*pattern.guard) != check.builtInTypes["bool"]) {
-                    std::cout << "guards must evaluate to a boolean"
-                              << std::endl;
-                    throw "";
+                auto guardType = check(*pattern.guard);
+                if (guardType != check.builtInTypes["bool"]) {
+                    check.logError(
+                        spanOf(*pattern.guard), "error",
+                        "guards must evaluate to a boolean, found {}", guardType
+                    );
                 }
             }
         }
@@ -1383,9 +2325,12 @@ struct TypeChecker {
                                     expression.value
                                 ) &&
                                 expressionType != check.builtInTypes["bool"]) {
-                                std::cout << "guards must evaluate to a boolean"
-                                          << std::endl;
-                                throw "";
+                                check.logError(
+                                    spanOf(expression), "error",
+                                    "guards must evaluate to a boolean, found "
+                                    "{}",
+                                    expressionType
+                                );
                             }
                         } else {
                             body.anonymous = true;
@@ -1394,14 +2339,16 @@ struct TypeChecker {
                             check.scope.add("", type, false);
                             std::cout << "G" << std::endl;
                             check.scope.matchedField.reset();
-                            expression = ast::Binary<"==">{
-                                Span{}, std::move(expression),
-                                ast::Expression{ast::Variable{
-                                    Span{},
-                                    {},
-                                    check.scope.bindings.size() - 1}}};
-                            std::cout << "G" << std::endl;
-                            check(expression);
+                            auto [newExpr, _] =
+                                check.subsituteOverloadedOperator(
+                                    ast::Binary<"==">{
+                                        Span{}, std::move(expression),
+                                        ast::Expression{ast::Variable{
+                                            Span{},
+                                            {},
+                                            check.scope.bindings.size() - 1}}}
+                                );
+                            expression = std::move(newExpr);
                             std::cout << "G" << std::endl;
                             check.scope.exit(check.controlFlowDepth);
                         }
@@ -1415,31 +2362,37 @@ struct TypeChecker {
             Type target = tupleType;
             if (tuple.name) {
                 auto type = check.resolve(*tuple.name);
-                if (type != tupleType && !isNever(tupleType)) {
-                    std::cout << "mismatched type" << std::endl;
-                    throw "";
+                if (type) {
+                    if (type != tupleType && !isNever(tupleType)) {
+                        check.logError(
+                            tuple.span, "error",
+                            "cannot match type {} against {}", *type, tupleType
+                        );
+                    }
+                    target = check.protoOf(std::get<type::Named>(*type));
                 }
-                target = check.protoOf(std::get<type::Named>(type));
             }
 
             type::Tuple const* type = std::get_if<type::Tuple>(&target);
             if (!type && !isNever(tupleType)) {
-                std::cout << "not a tuple type" << std::endl;
-                throw "";
+                check.logError(
+                    tuple.span, "error", "type {} is not a tuple", tupleType
+                );
+                return;
             }
 
             if (!isNever(tupleType) &&
                 type->fields.size() != tuple.fields.size()) {
-                std::cout << "invalid tuple size" << std::endl;
-                throw "";
+                check.logError(
+                    tuple.span, "error", "expected {} fields, found {}",
+                    tuple.fields.size(), type->fields.size()
+                );
             }
 
-            for (size_t i = 0; i < tuple.fields.size(); ++i) {
+            for (auto&& [field, type] :
+                 views::zip(tuple.fields, type->fields)) {
                 Type never{type::Never{}};
-                (*this)(
-                    tuple.fields[i].body,
-                    isNever(tupleType) ? never : type->fields[i]
-                );
+                (*this)(field.body, isNever(tupleType) ? never : type);
             }
 
             tuple.type = tupleType;
@@ -1448,15 +2401,20 @@ struct TypeChecker {
         void
         operator()(ast::DestructureVector& vector, Type const& vectorType) {
             if (!allowGuards) {
-                std::cout << "this pattern cannot fail" << std::endl;
-                throw "";
+                check.logError(
+                    vector.span, "error",
+                    "vector destructures not allowed in this context"
+                );
             }
             type::Named const* type = std::get_if<type::Named>(&vectorType);
             if (!isNever(vectorType) &&
                 (!type || type->declaration != check.typeScope["std::Vector"]
                 )) {
-                std::cout << "not a vector type" << std::endl;
-                throw "";
+                check.logError(
+                    vector.span, "error", "expected a vector type, found {}",
+                    vectorType
+                );
+                return;
             }
             vector.elementType = isNever(vectorType) ? Type{type::Never{}}
                                                      : type->typeArguments[0];
@@ -1472,11 +2430,12 @@ struct TypeChecker {
                         },
                         [&](ast::RestElements& rest) {
                             if (std::exchange(restPresent, true)) {
-                                std::cout << "only one rest pattern is allowed"
-                                          << std::endl;
-                                throw "";
-                            }
-                            if (rest.binding) {
+                                check.logError(
+                                    rest.span, "error",
+                                    "only a single rest binding may appear in "
+                                    "a vector pattern"
+                                );
+                            } else if (rest.binding) {
                                 check.scope.add(
                                     rest.binding->value, vectorType, isMutable
                                 );
@@ -1494,11 +2453,16 @@ struct TypeChecker {
             Type target = structureType;
             if (structure.name) {
                 auto type = check.resolve(*structure.name);
-                if (type != structureType && !isNever(structureType)) {
-                    std::cout << "mismatched type" << std::endl;
-                    throw "";
+                if (type) {
+                    if (*type != structureType && !isNever(structureType)) {
+                        check.logError(
+                            structure.span, "error",
+                            "cannot match type {} against {}", *type,
+                            structureType
+                        );
+                    }
+                    target = check.protoOf(std::get<type::Named>(*type));
                 }
-                target = check.protoOf(std::get<type::Named>(type));
             }
             type::Struct const* type = std::get_if<type::Struct>(&target);
 
@@ -1508,8 +2472,10 @@ struct TypeChecker {
             }
 
             if (!type) {
-                std::cout << "not a struct type" << std::endl;
-                throw "";
+                check.logError(
+                    structure.span, "error", "{} is not struct type", target
+                );
+                return;
             }
 
             for (auto& property : structure.properties) {
@@ -1524,17 +2490,23 @@ struct TypeChecker {
                 auto propertyName =
                     std::get_if<ast::Variable>(&property.property.value);
                 if (!propertyName || propertyName->name.segments.size() != 1) {
-                    std::cout << "destructured properties may not be guarded"
-                              << std::endl;
-                    throw "";
+                    check.logError(
+                        spanOf(property.property.value), "error",
+                        "properties must bind to a variable"
+                    );
+                    return;
                 }
                 auto prop = std::ranges::find(
                     type.properties, propertyName->name.str(),
                     &std::pair<std::string, Type>::first
                 );
                 if (prop == type.properties.end()) {
-                    std::cout << "invalid property name" << std::endl;
-                    throw "";
+                    check.logError(
+                        spanOf(property.property.value), "error",
+                        "property {} was not found on type {}",
+                        propertyName->name.str(), Type{type::Struct{type}}
+                    );
+                    return;
                 }
                 property.propertyIndices.push_back(
                     std::distance(type.properties.begin(), prop)
@@ -1551,13 +2523,18 @@ struct TypeChecker {
                         property.property.value
                     )) {
                     if (!allowGuards) {
-                        std::cout << "this pattern cannot fail" << std::endl;
-                        throw "";
+                        check.logError(
+                            spanOf(property.property), "error",
+                            "guards are not allowed in this context"
+                        );
+                        return;
                     }
                     if (type != check.builtInTypes["bool"]) {
-                        std::cout << "guards must evaluate to a boolean"
-                                  << std::endl;
-                        throw "";
+                        check.logError(
+                            spanOf(property.property), "error",
+                            "guards must evaluate to a boolean, found {}", type
+                        );
+                        return;
                     }
                 }
             }
@@ -1566,10 +2543,16 @@ struct TypeChecker {
 
     Type operator()(ast::LetBinding& let) {
         Type type = (*this)(let.initalValue);
-        if (let.typeName &&
-            !type.isAssignableTo(resolve(let.typeName.value()))) {
-            std::cout << "cant assign this to" << std::endl;
-            throw "";
+        if (let.typeName) {
+            auto expected = resolve(let.typeName.value());
+            if (expected && !type.isAssignableTo(*expected)) {
+                logError(
+                    let.span, "error", "type {} is not assignable to {}", type,
+                    *expected
+                );
+            }
+            CheckPattern{*this, false, false}(let.binding, *expected);
+            return Type{builtInTypes["null"]};
         }
         CheckPattern{*this, false, false}(let.binding, type);
         return Type{builtInTypes["null"]};
@@ -1578,10 +2561,16 @@ struct TypeChecker {
     Type operator()(ast::VarBinding& var) {
         std::cout << "VAR BEGIN" << std::endl;
         Type type = (*this)(var.initalValue);
-        if (var.typeName &&
-            !type.isAssignableTo(resolve(var.typeName.value()))) {
-            std::cout << "cant assign this to" << std::endl;
-            throw "";
+        if (var.typeName) {
+            auto expected = resolve(var.typeName.value());
+            if (expected && !type.isAssignableTo(*expected)) {
+                logError(
+                    var.span, "error", "type {} is not assignable to {}", type,
+                    *expected
+                );
+            }
+            CheckPattern{*this, false, true}(var.binding, *expected);
+            return Type{builtInTypes["null"]};
         }
         CheckPattern{*this, false, true}(var.binding, type);
         std::cout << "VAR END" << std::endl;
@@ -1600,16 +2589,18 @@ struct TypeChecker {
         );
     }
 
-    void expect(Type const& type, auto& node) {
+    void expect(Span span, Type const& type, auto& node) {
         Type actual = (*this)(node);
         if (!actual.isAssignableTo(type)) {
-            std::cout << "exprected different type" << std::endl;
-            throw "";
+            logError(span, "error", "expected type {}, found {}", type, actual);
         }
     }
 
     Type operator()(ast::If& ifExpr) {
-        expect(Type{builtInTypes["bool"]}, *ifExpr.condition);
+        expect(
+            spanOf(*ifExpr.condition), Type{builtInTypes["bool"]},
+            *ifExpr.condition
+        );
 
         std::optional<Type> result{type::Never{}};
 
@@ -1627,17 +2618,20 @@ struct TypeChecker {
     }
 
     Type operator()(ast::While& loop) {
+        std::vector<Type> breaks;
+        auto previous = std::exchange(breakTypes, &breaks);
         std::visit(
             match{
                 [&](ast::Expression& expression) {
-                    expect(Type{builtInTypes["bool"]}, expression);
+                    expect(
+                        spanOf(expression), Type{builtInTypes["bool"]},
+                        expression
+                    );
                     ++controlFlowDepth;
                     (*this)(*loop.body);
                     --controlFlowDepth;
                 },
                 [&](ast::LetBinding& binding) {
-                    std::vector<Type> breaks;
-                    auto previous = std::exchange(breakTypes, &breaks);
                     ++controlFlowDepth;
                     scope.enter();
                     auto type = (*this)(binding.initalValue);
@@ -1645,19 +2639,8 @@ struct TypeChecker {
                     (*this)(*loop.body);
                     scope.exit(controlFlowDepth);
                     --controlFlowDepth;
-                    breakTypes = previous;
-                    for (auto& breakType : breaks) {
-                        if (!breakType.isAssignableTo(Type{builtInTypes["null"]}
-                            )) {
-                            std::cout << "exprected different type"
-                                      << std::endl;
-                            throw "";
-                        }
-                    }
                 },
                 [&](ast::VarBinding& binding) {
-                    std::vector<Type> breaks;
-                    auto previous = std::exchange(breakTypes, &breaks);
                     scope.enter();
                     ++controlFlowDepth;
                     auto type = (*this)(binding.initalValue);
@@ -1665,19 +2648,18 @@ struct TypeChecker {
                     (*this)(*loop.body);
                     --controlFlowDepth;
                     scope.exit(controlFlowDepth);
-                    breakTypes = previous;
-                    for (auto& breakType : breaks) {
-                        if (!breakType.isAssignableTo(Type{builtInTypes["null"]}
-                            )) {
-                            std::cout << "exprected different type"
-                                      << std::endl;
-                            throw "";
-                        }
-                    }
                 },
             },
             loop.condition->value
         );
+        breakTypes = previous;
+        for (auto& breakType : breaks) {
+            if (!breakType.isAssignableTo(Type{builtInTypes["null"]})) {
+                logError(
+                    loop.span, "error", "expected null, found {}", breakType
+                );
+            }
+        }
         return Type{builtInTypes["null"]};
     }
 
@@ -1689,25 +2671,33 @@ struct TypeChecker {
         std::cout << "checking..." << std::endl;
 
         if (call.argValues.size() != function.parameters.size()) {
-            std::cout << "invalid number of arguments" << std::endl;
-            throw "invalid number of arguments";
+            logError(
+                function.span, "invalid parameter count",
+                "expected {} parameters, found {}", function.parameters.size(),
+                call.argValues.size()
+            );
         }
-        std::cout << "1" << std::endl;
 
         if (call.typeArgumentNames.size() !=
             function.typeParameterNames.size()) {
-            std::cout << "invalid number of type arguments" << std::endl;
-            throw "invalid number of type arguments";
+            logError(
+                function.span, "invalid number of type parameters",
+                "expected {} type parameters, found {}",
+                function.typeParameterNames.size(),
+                call.typeArgumentNames.size()
+            );
         }
-        std::cout << "2" << std::endl;
 
         auto withres =
             with(blockTypeArguments, typeArguments, function.traitBounds);
-        // CHECK TRAIT BOUNDS
-        std::cout << "2.5" << std::endl;
-        if (!implementationScope.areSatisfied(std::move(withres))) {
-            std::cout << "trait bounds not satisfied" << std::endl;
-            throw "trait bounds not satisfied";
+
+        for (size_t i :
+             implementationScope.areSatisfiedAll(std::move(withres))) {
+            logError(
+                call.span, "trait bounds not satisfied",
+                "type {} does not implement {}", withres[i].first,
+                withres[i].second
+            );
         }
 
         return Type{
@@ -1715,8 +2705,11 @@ struct TypeChecker {
     }
 
     struct Inferer {
+        TypeChecker& tc;
         std::vector<std::optional<Type>> blockTypeArgs{};
         std::vector<std::optional<Type>> funTypeArgs{};
+        std::vector<ast::TypeParameter>* blockTypeParamNames;
+        std::vector<ast::TypeParameter>* funTypeParamNames;
 
         void presetBlock(std::vector<Type> const& args) {
             for (size_t i = 0; i < args.size(); ++i) {
@@ -1730,7 +2723,9 @@ struct TypeChecker {
         }
 
         bool match(Type const& first, Type const& second) {
-            return tryMatch(blockTypeArgs, funTypeArgs, first, second);
+            bool m = tryMatch(blockTypeArgs, funTypeArgs, first, second);
+            std::cout << "done match " << std::endl;
+            return m;
         }
 
         void checkArgs(
@@ -1739,42 +2734,82 @@ struct TypeChecker {
         ) {
             presetFun(tArgs);
             if (signature.parameters.size() != actual.size()) {
-                std::cout << "param count" << std::endl;
-                throw "method not found";
+                tc.logError(
+                    signature.span, "invalid parameter count",
+                    "expected {} parameters, found {}",
+                    signature.parameters.size(), actual.size()
+                );
             }
-            for (size_t i = 0; i < actual.size(); ++i) {
-                if (!this->match(signature.parameters[i].type, actual[i])) {
-                    std::cout << "invalid param type" << std::endl;
-                    throw "method not found";
+            for (auto&& [expected, found] :
+                 views::zip(signature.parameters, actual)) {
+                if (!this->match(expected.type, found)) {
+                    tc.logError(
+                        signature.span, "invalid parameter type",
+                        "expected type {}, found {}", expected.type, found
+                    );
                 }
             }
         }
 
         std::pair<std::vector<Type>, std::vector<Type>> get() {
             std::vector<Type> blockTArgs{};
-            for (auto& arg : blockTypeArgs) {
+            for (auto&& [i, arg] : blockTypeArgs | views::enumerate) {
                 if (!arg) {
-                    std::cout << "cound not infer type" << std::endl;
-                    throw "method not found";
+                    tc.logError(
+                        (*blockTypeParamNames)[i].span, "error",
+                        "could not infer type for type parameter {}",
+                        (*blockTypeParamNames)[i].name
+                    );
                 }
-                blockTArgs.push_back(*arg);
+                blockTArgs.push_back(arg || type::Never{});
             }
             std::vector<Type> funTArgs{};
-            for (auto& arg : funTypeArgs) {
+            for (auto&& [i, arg] : funTypeArgs | views::enumerate) {
                 if (!arg) {
-                    std::cout << "cound not infer type" << std::endl;
-                    throw "method not found";
+                    tc.logError(
+                        (*funTypeParamNames)[i].span, "error",
+                        "could not infer type for type parameter {}",
+                        (*funTypeParamNames)[i].name
+                    );
                 }
-                funTArgs.push_back(*arg);
+                funTypeArgs.push_back(arg || type::Never{});
             }
             return {blockTArgs, funTArgs};
         }
     };
 
+    bool isVisible(ast::FunctionDeclaration* func) {
+        return func->annotation ? true : thingIsVisible(func);
+    }
+
+    bool isVisible(auto thing) {
+        return thingIsVisible(thing);
+    }
+
+    bool isVisible(ast::TypeDeclaration* thing, ast::Visibility const& vis) {
+        return thingIsVisible(thing, vis) && thingIsVisible(thing);
+    }
+
+    bool thingIsVisible(auto thing) {
+        return thingIsVisible(thing, thing->visibility);
+    }
+
+    bool thingIsVisible(auto thing, ast::Visibility const& vis) {
+        using Level = ast::Visibility::Level;
+        switch (vis.level) {
+        case Level::Public:
+            return true;
+        case Level::Internal:
+            return packageName(thing->fullName) == currentModule->packageName();
+        case Level::Private:
+            return moduleName(thing->fullName) == currentModule->moduleId;
+        }
+    }
+
     Type operator()(ast::Call& call) {
         std::vector<Type> typeArguments{};
         for (auto& typeArg : call.typeArgumentNames) {
-            typeArguments.push_back(resolve(typeArg));
+            typeArguments.push_back(resolve(typeArg) || type::Never{});
         }
 
         return std::visit(
@@ -1785,48 +2820,112 @@ struct TypeChecker {
                         argTypes.push_back((*this)(arg));
                     }
                     std::cout << "processing function call... " << std::endl;
-                    auto func = funcScope.find(prepend(variable.name));
+                    auto name = prepend(variable.name);
+                    if (!name)
+                        return type::Never{};
+                    auto func = funcScope.find(*name);
                     if (func == funcScope.end()) {
-                        auto namedType = typeScope.find(prepend(variable.name));
+                        auto namedType = typeScope.find(*name);
                         if (namedType == typeScope.end()) {
-                            std::cout << "oh, undefined type "
-                                      << prepend(variable.name) << std::endl;
-                            throw "undefined type";
+                            logError(
+                                variable.span, "undeclared function",
+                                "no definition for function {} could be found",
+                                variable.name
+                            );
+                            return type::Never{};
+                        }
+                        if (!isVisible(namedType->second)) {
+                            logError(
+                                variable.span, "error",
+                                "type {} is not accessible", variable.name
+                            );
+                            return type::Never{};
                         }
                         if (namedType->second->typeParameterNames.size() !=
                             typeArguments.size()) {
-                            std::cout << "oh, wrong tparam count" << std::endl;
-                            throw "undefined type";
-                        }
-                        type::Tuple* tuple =
-                            std::get_if<type::Tuple>(&namedType->second->proto);
-                        if (!tuple) {
-                            std::cout << "oh, not a tuple" << std::endl;
-                            throw "undefined type";
-                        }
-                        if (tuple->fields.size() != call.argValues.size()) {
-                            std::cout << "wrong param size" << std::endl;
-                            throw "undefined type";
-                        }
-                        for (size_t i = 0; i < call.argValues.size(); ++i) {
-                            if ((*this)(call.argValues[i])
-                                    .isAssignableTo(with(
-                                        typeArguments, {}, tuple->fields[i]
-                                    ))) {
-                                std::cout << "invalid named type" << std::endl;
-                                throw "invalid named type";
-                            }
+                            logError(
+                                call.span, "invalid number of type parameters",
+                                "expected {} type parameters, found {}",
+                                namedType->second->typeParameterNames.size(),
+                                typeArguments.size()
+                            );
+                            return type::Never{};
                         }
                         auto constructedType = type::Named{
                             namedType->second,
                             std::move(typeArguments),
                         };
+                        type::Tuple* tuple =
+                            std::get_if<type::Tuple>(&namedType->second->proto);
+                        if (!tuple) {
+                            if (call.argValues.size() != 1) {
+                                logError(
+                                    call.span, "invalid initialization",
+                                    "prototype initializers reqire a single "
+                                    "value"
+                                );
+                                return constructedType;
+                            }
+                            auto proto = with(
+                                typeArguments, {}, namedType->second->proto
+                            );
+                            if (!argTypes[0].isAssignableTo(proto)) {
+                                logError(
+                                    call.span, "invalid initialization",
+                                    "type {} does not match the prototype of "
+                                    "{}",
+                                    argTypes[0],
+                                    Type{type::Named{constructedType}}
+                                );
+                            }
+                            auto constructedType = type::Named{
+                                namedType->second,
+                                std::move(typeArguments),
+                            };
+                            call.target = type::Named{constructedType};
+                            return std::move(Type{std::move(constructedType)});
+                        }
+                        if (tuple->fields.size() != call.argValues.size()) {
+                            logError(
+                                call.span, "invalid initialization",
+                                "type {} expects {} fields, but {} were "
+                                "provided",
+                                Type{type::Named{constructedType}},
+                                tuple->fields.size(), call.argValues.size()
+                            );
+                        }
+                        for (auto&& [expected, found] :
+                             views::zip(tuple->fields, argTypes)) {
+                            if (!found.isAssignableTo(
+                                    with(typeArguments, {}, expected)
+                                )) {
+                                logError(
+                                    call.span, "invalid initialization",
+                                    "type {} is not assignable to type {}",
+                                    found, with(typeArguments, {}, expected)
+                                );
+                            }
+                        }
                         call.target = type::Named{constructedType};
                         return std::move(Type{std::move(constructedType)});
                     }
+
+                    if (!isVisible(func->second)) {
+                        logError(
+                            variable.span, "error",
+                            "function {} is not accessible", variable.name
+                        );
+                        return type::Never{};
+                    }
+
                     std::cout << "found func" << std::endl;
 
-                    Inferer inferer{};
+                    Inferer inferer{
+                        *this,
+                        {},
+                        {},
+                        nullptr,
+                        &func->second->typeParameterNames};
                     inferer.funTypeArgs.resize(
                         func->second->typeParameterNames.size()
                     );
@@ -1860,7 +2959,8 @@ struct TypeChecker {
 
                     // regular method
                     for (auto impl : implScope) {
-                        Inferer inferer{};
+                        Inferer inferer{
+                            *this, {}, {}, &impl->typeParameterNames, nullptr};
                         inferer.blockTypeArgs.resize(
                             impl->typeParameterNames.size()
                         );
@@ -1874,6 +2974,16 @@ struct TypeChecker {
                                 }
                             );
                             if (func != impl->functions.end()) {
+                                if (!isVisible(func)) {
+                                    logError(
+                                        call.span, "error",
+                                        "method {} is not accessible",
+                                        func->name
+                                    );
+                                    return type::Never{};
+                                }
+                                inferer.funTypeParamNames =
+                                    &func->typeParameterNames;
                                 inferer.funTypeArgs.resize(
                                     func->typeParameterNames.size()
                                 );
@@ -1896,6 +3006,7 @@ struct TypeChecker {
                         }
                     }
 
+                    std::cout << "so trait methdod " << std::endl;
                     // maybe it's a trait method
                     std::vector<std::pair<ast::TraitDeclaration*, size_t>>
                         candidates;
@@ -1915,19 +3026,44 @@ struct TypeChecker {
                             );
                         }
                     }
+                    std::cout << "so trait methdod? " << candidates.size()
+                              << std::endl;
                     if (candidates.size() == 0) {
-                        std::cout << "no such method" << std::endl;
-                        throw "method not found";
+                        logError(
+                            method.property.span, "undefined method",
+                            "no method named {} was found in the current scope",
+                            method.property.value
+                        );
+                        return type::Never{};
                     }
                     if (candidates.size() > 1) {
-                        std::cout << "multiple candidates found" << std::endl;
-                        throw "method not found";
+                        logError(
+                            method.property.span, "error",
+                            "ambiguous call - multiple candidate trait methods "
+                            "found"
+                        );
+                        return type::Never{};
                     }
                     auto traitDecl = candidates[0].first;
+                    if (!isVisible(traitDecl)) {
+                        logError(
+                            method.property.span, "error",
+                            "trait {} is not accessible", traitDecl->name
+                        );
+                        return type::Never{};
+                    }
                     auto idx = candidates[0].second;
-                    Inferer inferer{};
+                    Inferer inferer{
+                        *this,
+                        {},
+                        {},
+                        &traitDecl->typeParameterNames,
+                        &traitDecl->signatures[idx].typeParameterNames};
                     inferer.blockTypeArgs.resize(
                         traitDecl->typeParameterNames.size()
+                    );
+                    inferer.funTypeArgs.resize(
+                        traitDecl->signatures[idx].typeParameterNames.size()
                     );
                     inferer.checkArgs(
                         traitDecl->signatures[idx], typeArguments, argTypes
@@ -1935,14 +3071,18 @@ struct TypeChecker {
                     auto [traitTypeArguments, tArgs] = inferer.get();
 
                     Trait trait{traitDecl, std::move(traitTypeArguments)};
-                    if (!implementationScope.areSatisfied({{lhsType, trait}})) {
-                        std::cout << "not implemented" << std::endl;
-                        throw "method not found";
+
+                    for (size_t i :
+                         implementationScope.areSatisfiedAll({{lhsType, trait}}
+                         )) {
+                        logError(
+                            call.span, "trait bounds not satisfied",
+                            "type {} does not implement {}", lhsType, trait
+                        );
                     }
 
                     method.propertyIdx = idx;
 
-                    // blockTypeParameters
                     traitTypeArguments.push_back(Type{lhsType});
                     auto resolvedReturnType = checkCall(
                         trait.declaration->signatures[idx], call,
@@ -1954,10 +3094,12 @@ struct TypeChecker {
                     };
                     return std::move(resolvedReturnType);
                 },
-                [](auto const&) -> Type {
-                    std::cout << "only functions or methods can be called"
-                              << std::endl;
-                    throw "only functions or methods can be called";
+                [&](auto const&) -> Type {
+                    logError(
+                        spanOf(*call.lhs), "invalid call",
+                        "only functions or methods may be called"
+                    );
+                    return type::Never{};
                 },
             },
             call.lhs->value
@@ -1967,8 +3109,7 @@ struct TypeChecker {
     Type operator()(ast::PropertyAccess& access) {
         auto type = (*this)(*access.lhs);
         access.namedDepth = 0;
-        std::cout << "it is " << type << std::endl;
-        return std::visit(FieldAccessor{access}, type);
+        return std::visit(FieldAccessor{*this, access}, type);
     }
 
     Type operator()(ast::TupleFieldAccess& access) {
@@ -1979,9 +3120,13 @@ struct TypeChecker {
                     return Type{tuple.fields[access.propertyIdx]};
                 },
                 [&](type::Never const&) -> Type { return type::Never{}; },
-                [](auto const&) -> Type {
-                    std::cout << "field access on non-tuple" << std::endl;
-                    throw "field access on non-tuple";
+                [&](auto const&) -> Type {
+                    logError(
+                        spanOf(*access.lhs), "error",
+                        "expected tuple type as field access operand, found {}",
+                        type
+                    );
+                    return type::Never{};
                 },
             },
             type
@@ -1994,7 +3139,10 @@ struct TypeChecker {
             blockTypeParameters[parameter.value] = i++;
         }
 
-        impl.type = resolve(impl.typeName);
+        auto targetType = resolve(impl.typeName);
+        if (!targetType)
+            return;
+        impl.type = *targetType;
         std::cout << "got impl type " << impl.type << std::endl;
         selfType = Type{impl.type};
 
@@ -2035,7 +3183,9 @@ struct TypeChecker {
             Span::null(),
             lexer::Identifier{"Type", Span::null()},
             {},
+            {{}, ast::Visibility::Level::Public},
             ast::TypeName{},
+            {{}, ast::Visibility::Level::Public},
             type::Struct{{{"size", Type{builtInTypes["int"]}}}},
         };
         modules = &program;
@@ -2044,9 +3194,13 @@ struct TypeChecker {
             currentModule = mod;
             collectFunctions(funcScope, mod->program, mod->moduleId);
             collectNamedTypes(typeScope, mod->program, mod->moduleId);
-            collectTraitDeclarations(
-                traitScope, mod->program, mod->moduleId
-            );
+            collectTraitDeclarations(traitScope, mod->program, mod->moduleId);
+            for (auto& impl : mod->program.implementations) {
+                for (auto& func : impl.functions) {
+                    func.fullName =
+                        fmt::format("{}::{}", mod->moduleId, func.name.value);
+                }
+            }
         }
 
         for (auto& mod : program) {
@@ -2094,26 +3248,13 @@ struct TypeChecker {
                 (*this)(trait);
             }
         }
-        for (auto& mod : program) {
-            currentModule = mod;
-            for (auto& trait : mod->program.traitImplementations) {
-                (*this)(trait);
-                std::cout << "one checked" << std::endl;
-            }
+        for (auto& trait : implementationScope.root.children) {
+            currentModule = trait.impl->location;
+            (*this)(*trait.impl);
         }
-        std::cout << "trait impls" << std::endl;
+
+        for (auto& error : implementationScope.removeDuplicates()) {
+            log.diagnostics.push_back(std::move(error));
+        }
     }
-
-    // void take(ast::Expression& expression) {
-    //     ast::Variable* var = std::get_if<ast::Variable>(&expression.value);
-    //     if (!var) {
-    //         return;
-    //     }
-    //     ast::Parameter** param = std::get_if<ast::Parameter*>(&var->binding);
-    //     if (!param) {
-    //         return;
-    //     }
-
-    //     (**param).willMove = true;
-    // }
 };

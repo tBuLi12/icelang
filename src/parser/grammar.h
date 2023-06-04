@@ -101,6 +101,7 @@ struct PrefixExpression {};
 struct PrefixGuard {};
 struct PrefixScrutinee {};
 struct FunctionBody {};
+struct FunctionWithVisibility {};
 
 template <class T> constexpr bool ruleFor = false;
 
@@ -122,6 +123,7 @@ constexpr auto ident = Rule<lexer::Identifier>{};
 constexpr auto integer = Rule<lexer::IntegerLiteral>{};
 constexpr auto floating = Rule<lexer::FloatLiteral>{};
 constexpr auto string = Rule<lexer::StringLiteral>{};
+constexpr auto character = Rule<lexer::CharLiteral>{};
 constexpr auto expression = Rule<Expression>{};
 constexpr auto block = Rule<Block>{};
 constexpr auto tuple = Rule<TupleLiteral>{};
@@ -130,6 +132,7 @@ constexpr auto pattern = Rule<Pattern>{};
 constexpr auto destructure = Rule<Destructure>{};
 constexpr auto prefixGuard = Rule<PrefixGuard>{};
 constexpr auto prefixExpression = Rule<PrefixExpression>{};
+constexpr auto visibility = Rule<Visibility>{};
 
 // clang-format off
 
@@ -139,7 +142,7 @@ RULE(StructLiteral, structLiteral) = "{"_p + separatedWith<",">(property) + "}"_
 
 constexpr auto scrutineePrimary = as<Expression>(
     variable | structLiteral |
-    (tuple | expression) | vector
+    (tuple | expression) | vector | character
 );
 
 RULE(PrefixScrutinee, scrutineePrefix) = as<Expression>(
@@ -159,7 +162,7 @@ RULE(MatchCase, matchCase) = openPattern + "=>"_p + matchArm;
 RULE(Match, _match) = "match"_kw + scrutinee + "{"_p + separatedWith<",">(matchCase) + "}"_p;
 
 constexpr auto primaryGuard = as<Expression>(
-    variable | integer | string | floating
+    variable | integer | string | floating | character
 );
 
 constexpr auto primaryExpression = as<Expression>(
@@ -168,6 +171,7 @@ constexpr auto primaryExpression = as<Expression>(
     | (structLiteral | block) 
     | (tuple | expression) 
     | integer 
+    | character
     | floating 
     | vector 
     | _match
@@ -238,7 +242,7 @@ RULE(TypeParameter, typeParameter) = ident + optionOrDefault("is"_kw + separated
 constexpr auto typeParameterList = optionOrDefault("<"_p + separatedWith<",">(typeParameter) + ">"_p);
 
 RULE(Signature, signature) = option("@"_p + as<Annotation>(ident)) + "fun"_kw + ident +  typeParameterList + "("_p + separatedWith<",">(parameter) + ")"_p + option(":"_p + typeName);
-RULE(TypeDeclaration, typeDeclaration) = "type"_kw + ident + typeParameterList + typeName;
+RULE(TypeDeclaration, typeDeclaration) = "type"_kw + ident + typeParameterList + visibility + typeName;
 RULE(TraitDeclaration, traitDeclaration) = "trait"_kw + ident + typeParameterList + "{"_p + list(signature) + "}"_p;
 RULE(FunctionBody, functionBody) = as<Expression>(as<Expression>("->"_p + tupleExpression) | as<Expression>(block));
 RULE(FunctionDeclaration, functionDeclaration) = signature + functionBody;

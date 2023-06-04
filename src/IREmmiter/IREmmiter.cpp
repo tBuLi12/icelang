@@ -71,8 +71,6 @@ struct Value {
 };
 
 struct IRVisitor {
-    Source source;
-
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::IRBuilder<>> builder;
     std::unique_ptr<llvm::Module> currentModule;
@@ -83,6 +81,7 @@ struct IRVisitor {
     std::vector<Type> const* blockTypeArguments;
 
     std::vector<FunctionMonomorph*> signatureStack{};
+    ast::FunctionDeclaration* currentFunction;
 
     std::unordered_map<std::string, TypeMonomorph*> namedTypes{};
     std::unordered_map<std::string, FunctionMonomorph*> functions{};
@@ -93,6 +92,7 @@ struct IRVisitor {
     Function sliceFunc;
 
     ast::TypeDeclaration* vecDeclaration;
+    ast::TypeDeclaration* stringDeclaration;
     ast::TraitDeclaration* copyDeclaration;
     ast::TraitDeclaration* dropDeclaration;
     llvm::Function* rtOobError;
@@ -102,29 +102,7 @@ struct IRVisitor {
 
     std::vector<Module*>* modules;
 
-    std::string findOwner(ast::FunctionDeclaration* declaration) {
-        for (auto& mod : *modules) {
-            auto ptr = mod->program.functions.data();
-            if (ptr <= declaration &&
-                declaration < (ptr + mod->program.functions.size())) {
-                return mod->moduleId;
-            }
-        }
-        std::cout << "no owner" << std::endl;
-        throw "";
-    }
 
-    std::string findOwner(ast::TypeDeclaration* declaration) {
-        for (auto& mod : *modules) {
-            auto ptr = mod->program.typeDeclarations.data();
-            if (ptr <= declaration &&
-                declaration < (ptr + mod->program.typeDeclarations.size())) {
-                return mod->moduleId;
-            }
-        }
-        std::cout << "no owner" << std::endl;
-        throw "";
-    }
 
     void append(llvm::BasicBlock* block) {
         auto function = builder->GetInsertBlock()->getParent();
@@ -322,9 +300,32 @@ struct IRVisitor {
         return never;
     }
 
-    Value operator()(lexer::StringLiteral&&) {
-        fmt::println("unsupported");
-        throw "";
+    Value operator()(lexer::CharLiteral&& character) {
+        auto val= Value{getInt(8, character.value), {}, builtInTypes["char"]};
+            fmt::println("char time");
+            return val;
+    }
+
+    Value operator()(lexer::StringLiteral&& string) {
+        auto ptr = builder->CreateGlobalStringPtr(string.value, "strLiteral");
+        auto size = getInt(32, string.value.size());
+        fmt::println("str done");
+        llvm::Value* bufPtr =
+            builder->CreateCall(functions["rtAlloc"]->asLLVM, {size});
+        fmt::println("str done");
+
+        builder->CreateCall(functions["rtMove"]->asLLVM, {getInt(32, 0), bufPtr, ptr, size});
+        llvm::Value* charVector = getEmptyVector(builtInTypes["char"], size, bufPtr);
+        fmt::println("str done");
+        Type stringt{type::Named{stringDeclaration, {}}};
+        fmt::println("str done1 {}", stringt);
+        auto s = asLLVM(stringt);
+        fmt::println("str done1x ");
+        auto undef = llvm::UndefValue::get(s);
+        fmt::println("str done2");
+        auto strIs = insert({undef, {}, stringt}, 0, charVector);
+        fmt::println("str done");
+        return strIs;
     }
 
     llvm::Value* indexVector(Value vector, Value index, Span accessSpan) {
@@ -337,7 +338,9 @@ struct IRVisitor {
         builder->CreateCondBr(isOutOfBounds, outOfBounds, inBounds);
         appendAndSetInsertTo(outOfBounds);
         std::stringstream error{};
-        logs::SpannedMessage msg{source, accessSpan, "", ""};
+        fmt::println("into8 index access");
+        logs::SpannedMessage msg{currentFunction->location->source, accessSpan, "", ""};
+        fmt::println("into9 index access");
         std::cout << msg << std::endl;
         msg.printBodyTo(error);
         auto errorMessage =
@@ -358,8 +361,10 @@ struct IRVisitor {
     Value operator()(ast::IndexAccess&& access) {
         fmt::println("into index access");
         auto lhs = (*this)(*access.lhs);
+        fmt::println("into5 index access");
         std::cout << lhs.type << std::endl;
         auto index = (*this)(*access.index);
+        fmt::println("into4 index access");
         if (isNever(lhs) || isNever(index))
             return never;
 
@@ -376,21 +381,36 @@ struct IRVisitor {
         return Value{value, lhs.owner, access.type};
     }
 
+    llvm::Value* getEmptyVector(Type const& elemType, llvm::Value* size, llvm::Value* buffer) {
+        llvm::Value* literal =    llvm::UndefValue::get(asLLVM(type::Named{
+            vecDeclaration, {Type{elemType}}}));
+
+        literal = builder->CreateInsertValue(literal, buffer, {0, 0});
+        literal = builder->CreateInsertValue(literal, size, {0, 1});
+        literal = builder->CreateInsertValue(literal, size, {0, 2});
+        return literal;
+    }
+
     Value operator()(ast::VectorLiteral&& vector) {
         auto elements = std::get_if<ast::VectorElements>(&vector.content);
         size_t nOfElems = elements ? elements->elements.size() : 0;
         llvm::Type* elemType = asLLVM(vector.elementType);
 
+            fmt::println("wilee 0");
         std::vector<Value> values{};
         for (size_t i = 0; i < nOfElems; ++i) {
+            fmt::println("wilee n{}", i);
             values.push_back((*this)(std::move(elements->elements[i])));
         }
+            fmt::println("wilee 1");
 
         llvm::Value* elementSize = getInt(
             32, currentModule->getDataLayout().getTypeAllocSize(elemType)
         );
+            fmt::println("wilee 2");
         std::vector<llvm::Value*> lengths{getInt(32, 0)};
         for (size_t i = 0; i < nOfElems; ++i) {
+            fmt::println("wilee 5");
             if (auto spread =
                     std::get_if<ast::Spread>(&elements->elements[i].value)) {
                 lengths.push_back(builder->CreateAdd(
@@ -402,8 +422,10 @@ struct IRVisitor {
                 );
             }
         }
+            fmt::println("wilee 28");
 
         auto byteCap = builder->CreateMul(lengths.back(), elementSize);
+
         llvm::Value* ptr =
             builder->CreateCall(functions["rtAlloc"]->asLLVM, {byteCap});
 
@@ -420,6 +442,7 @@ struct IRVisitor {
                 );
                 drop(owned);
             } else {
+                
                 llvm::Value* element =
                     builder->CreateInBoundsGEP(elemType, ptr, {lengths[i]});
                 builder->CreateStore(copy(values[i]), element);
@@ -427,12 +450,7 @@ struct IRVisitor {
             fmt::println("will aaa {}", nOfElems);
         }
 
-        llvm::Value* literal = llvm::UndefValue::get(asLLVM(type::Named{
-            vecDeclaration, {Type{vector.elementType}}}));
-
-        literal = builder->CreateInsertValue(literal, ptr, {0, 0});
-        literal = builder->CreateInsertValue(literal, lengths.back(), {0, 1});
-        literal = builder->CreateInsertValue(literal, lengths.back(), {0, 2});
+        llvm::Value* literal = getEmptyVector(vector.elementType, lengths.back(), ptr);
         fmt::println("will print type");
         std::cout << vector.type << std::endl;
         auto val = Value{literal, {}, vector.type};
@@ -453,44 +471,111 @@ struct IRVisitor {
     }
 
     Value operator()(ast::Expression& expression) {
-        fmt::println("visiting it");
+        fmt::println("visiting it {}", expression.value.index());
         auto val = std::visit(std::move(*this), std::move(expression.value));
         fmt::println("after visit");
         return val;
     }
 
     template <String op> Value operator()(ast::Binary<op>&& binary) {
-        Value lhs = (*this)(*binary.lhs);
+        Value lhs = binary.lhs ? (*this)(*binary.lhs) : chainValue;
         Value rhs = (*this)(*binary.rhs);
         if (isNever(lhs) || isNever(rhs))
             return never;
         return (*this)(std::move(binary), lhs, rhs);
     }
+    Value chainValue;
 
-    Value operator()(ast::Binary<"+">&& binary) {
-        fmt::println("mkaing addition");
-        Value lhs = (*this)(*binary.lhs);
-        fmt::println("lhs done");
-        Value rhs = (*this)(*binary.rhs);
-        if (isNever(lhs) || isNever(rhs))
-            return never;
-        return (*this)(std::move(binary), lhs, rhs);
-    }
-
-    template <String op>
-    Value operator()(ast::Binary<op>&& addition, Value lhs, Value rhs) {
-        fmt::println("unsupported");
-        throw "";
-    }
-    Value operator()(ast::Binary<"+">&& addition, Value lhs, Value rhs) {
-        if (lhs->getType()->isIntegerTy() && lhs->getType()->isIntegerTy()) {
-            return Value{builder->CreateAdd(lhs, rhs), {}, addition.type};
+    // template <String op>
+    // Value operator()(ast::Binary<op>&& addition, Value lhs, Value rhs) {
+    //     fmt::println("unsupported {}", op.characters);
+    //     throw "";
+    // }
+    Value operator()(ast::Binary<"<=">&& addition, Value lhs, Value rhs) {
+        if (lhs.type == &type::floating) {
+            return {builder->CreateFCmpULE(lhs, rhs), {}, &type::boolean};
         }
-        return Value{builder->CreateFAdd(lhs, rhs), {}, addition.type};
+        return {builder->CreateICmpSLE(lhs, rhs), {}, &type::boolean};
+    }
+
+    Value operator()(ast::Binary<">=">&& addition, Value lhs, Value rhs) {
+        if (lhs.type == &type::floating) {
+            return {builder->CreateFCmpUGE(lhs, rhs), {}, &type::boolean};
+        }
+        return {builder->CreateICmpSGE(lhs, rhs), {}, &type::boolean};
+    }
+
+    Value operator()(ast::Binary<"<">&& addition, Value lhs, Value rhs) {
+        if (lhs.type == &type::floating) {
+            return {builder->CreateFCmpULT(lhs, rhs), {}, &type::boolean};
+        }
+        return {builder->CreateICmpSLT(lhs, rhs), {}, &type::boolean};
+    }
+
+    Value operator()(ast::Binary<">">&& addition, Value lhs, Value rhs) {
+        if (lhs.type == &type::floating) {
+            return {builder->CreateFCmpUGT(lhs, rhs), {}, &type::boolean};
+        }
+        return {builder->CreateICmpSGT(lhs, rhs), {}, &type::boolean};
+    }
+
+    Value operator()(ast::Binary<"/">&& addition, Value lhs, Value rhs) {
+        if (lhs.type == &type::floating) {
+            return {builder->CreateFDiv(lhs, rhs), {}, &type::floating};
+        }
+        return {builder->CreateSDiv(lhs, rhs), {}, &type::integer};
+    }
+
+    Value operator()(ast::Binary<"-">&& addition, Value lhs, Value rhs) {
+        if (lhs.type == &type::floating) {
+            return {builder->CreateFSub(lhs, rhs), {}, &type::floating};
+        }
+        return {builder->CreateSub(lhs, rhs), {}, &type::integer};
+    }
+
+    Value operator()(ast::Binary<"&&">&& logicAnd) {
+        fmt::println("LOGIC AND lhs");
+        Value lhs = (*this)(*logicAnd.lhs);
+        auto currentBlock = builder->GetInsertBlock();
+        auto shortCircuit = createBlock("short");
+        auto evalRhs = createBlock("rhs");
+        builder->CreateCondBr(lhs, evalRhs, shortCircuit);
+        appendAndSetInsertTo(evalRhs);
+        fmt::println("LOGIC AND rhs");
+        Value rhs = (*this)(*logicAnd.rhs);
+        builder->CreateBr(shortCircuit);
+        appendAndSetInsertTo(shortCircuit);
+        auto phi = builder->CreatePHI(type::boolean.asLLVM, 2);
+        phi->addIncoming(getInt(1, 0), currentBlock);
+        phi->addIncoming(rhs, evalRhs);
+        return {phi, {}, &type::boolean};
+    }
+
+    Value operator()(ast::Binary<"||">&& logicOr) {
+        Value lhs = (*this)(*logicOr.lhs);
+        auto currentBlock = builder->GetInsertBlock();
+        auto shortCircuit = createBlock("short");
+        auto evalRhs = createBlock("rhs");
+        builder->CreateCondBr(lhs, shortCircuit, evalRhs);
+        appendAndSetInsertTo(evalRhs);
+        Value rhs = (*this)(*logicOr.rhs);
+        builder->CreateBr(shortCircuit);
+        appendAndSetInsertTo(shortCircuit);
+        auto phi = builder->CreatePHI(type::boolean.asLLVM, 2);
+        phi->addIncoming(getInt(1, 1), currentBlock);
+        phi->addIncoming(rhs, evalRhs);
+        return {phi, {}, &type::boolean};
+    }
+
+    Value operator()(ast::Binary<"+">&& addition, Value lhs, Value rhs) {
+        if (lhs.type == &type::floating) {
+            return Value{builder->CreateFAdd(lhs, rhs), {}, &type::floating};
+        }
+        return Value{builder->CreateAdd(lhs, rhs), {}, &type::integer};
     }
 
     Value operator()(ast::Binary<"==">&& equate, Value lhs, Value rhs) {
-        fmt::println("time for eq");
+        chainValue = rhs;
         return Value{builder->CreateICmpEQ(lhs, rhs), {}, equate.type};
     }
 
@@ -830,7 +915,11 @@ struct IRVisitor {
 
     Value operator()(lexer::IntegerLiteral&& integer) {
         std::cout << "returning integer" << std::endl;
-        return {getInt(32, integer.value), {}, builtInTypes["int"]};
+        return getInt(32, integer.value);
+    }
+
+    Value operator()(lexer::FloatLiteral&& floating) {
+        return {llvm::ConstantFP::get(*context, llvm::APFloat(floating.value)), {}, builtInTypes["float"]};
     }
 
     Value operator()(ast::TupleLiteral&& tuple) {
@@ -1014,23 +1103,26 @@ struct IRVisitor {
         return cl;
     }
 
-    Value operator()(ast::Call&& call) {
-        fmt::println("EMIT call2");
+    std::optional<std::vector<Value>> getArgs(ast::Call& call) {
         std::vector<Value> args{};
-        std::vector<std::variant<std::monostate, size_t, Temp>> owners{};
         for (auto& arg : call.argValues) {
             Value argValue = (*this)(arg);
             if (isNever(argValue)) {
                 fmt::println("never arg! {}", arg);
-                return never;
+                return {};
             }
             args.push_back(argValue);
-            owners.push_back(argValue.owner);
         }
+        return args;
+    }
 
+    Value operator()(ast::Call&& call) {
         auto ret = std::visit(
             match{
-                [&](Function const& function) -> llvm::Value* {
+                [&](Function const& function) -> Value {
+                    auto maybeArgs = getArgs(call);
+                    if (!maybeArgs) return never;
+                    auto args = std::move(*maybeArgs);
                     fmt::println("EMIT call3");
                     auto monomorphName =
                         function.declaration->annotation
@@ -1044,13 +1136,23 @@ struct IRVisitor {
                     }
                     auto result = this->call(func, args);
                     for (size_t i = 0; i < args.size(); ++i) {
-                        if (owners[i].index() == 0)
+                        if (args[i].owner.index() == 0)
                             drop(args[i]);
                     }
-                    return result;
+                    return {result, {}, call.type};
                 },
-                [&](type::Named const& type) -> llvm::Value* {
+                [&](type::Named const& type) -> Value {
+                    auto maybeArgs = getArgs(call);
+                    if (!maybeArgs) return never;
+                    auto args = std::move(*maybeArgs);
+                    
                     auto literal = llvm::UndefValue::get(asLLVM(type));
+                    if (!std::holds_alternative<type::Tuple>(type.declaration->proto)) {
+                        fmt::println("EMIT call4");
+                        auto res = builder->CreateInsertValue(literal, copy(args[0]), {0});
+                        fmt::println("EMIT call5");
+                        return {res, {}, call.type};
+                    }
                     for (size_t i = 0; i < args.size(); ++i) {
                         builder->CreateInsertValue(
                             literal, copy(args[i]),
@@ -1058,36 +1160,48 @@ struct IRVisitor {
                         );
                     }
 
-                    return literal;
+                    return {literal, {}, call.type};
                 },
-                [&](TraitMethodRef const& method) -> llvm::Value* {
+                [&](TraitMethodRef const& method) -> Value {
                     ast::PropertyAccess& access =
                         std::get<ast::PropertyAccess>(call.lhs->value);
-                    auto lhs = (*this)(*access.lhs);
+                    auto lhs = access.lhs ? (*this)(*access.lhs) : chainValue;
+
+                    auto maybeArgs = getArgs(call);
+                    if (!maybeArgs) return never;
+                    auto args = std::move(*maybeArgs);
+
+
                     TraitImplRef impl = implScope.find(
                         with(*blockTypeArguments, *typeArguments, lhs.type),
                         with(*blockTypeArguments, *typeArguments, method.trait)
                     );
 
                     // impl.
+                    if (args.size() > 0) chainValue = args.back();
                     std::vector<Value> args2{args};
                     auto result = callTraitMethod(
                         lhs, access.propertyIdx, method.typeArguments, impl,
                         args2
                     );
                     std::cout << "has called trait " << args.size() << " "
-                              << owners.size() << std::endl;
+                               << std::endl;
+                    if (lhs.owner.index() == 0) drop(lhs);
                     for (size_t i = 0; i < args.size(); ++i) {
-                        if (owners[i].index() == 0)
+                        if (args[i].owner.index() == 0)
                             drop(args[i]);
                     }
                     std::cout << "after drop" << std::endl;
-                    return result;
+                    return {result, {}, call.type};
                 },
-                [&](ImplRef const& method) -> llvm::Value* {
+                [&](ImplRef const& method) -> Value {
                     ast::PropertyAccess& access =
                         std::get<ast::PropertyAccess>(call.lhs->value);
                     auto lhs = (*this)(*access.lhs);
+                    
+                    auto maybeArgs = getArgs(call);
+                    if (!maybeArgs) return never;
+                    auto args = std::move(*maybeArgs);
 
                     std::vector<Value> args2{args};
                     auto result = callMethod(
@@ -1096,11 +1210,11 @@ struct IRVisitor {
                     );
 
                     for (size_t i = 0; i < args.size(); ++i) {
-                        if (owners[i].index() == 0)
+                        if (args[i].owner.index() == 0)
                             drop(args[i]);
                     }
 
-                    return result;
+                    return {result, {}, call.type};
                 },
             },
             call.target
@@ -1156,14 +1270,14 @@ struct IRVisitor {
         };
     }
 
-    Value insert(Value value, size_t index, Value field) {
+    Value insert(Value value, size_t index, llvm::Value* field) {
         return insert(
             value, llvm::ArrayRef{static_cast<unsigned int>(index)}, field
         );
     }
 
     Value
-    insert(Value value, llvm::ArrayRef<unsigned int> indices, Value field) {
+    insert(Value value, llvm::ArrayRef<unsigned int> indices, llvm::Value* field) {
         return {
             builder->CreateInsertValue(value.asLLVM, field, indices),
             value.owner,
@@ -1246,7 +1360,6 @@ struct IRVisitor {
                     [&](ast::Expression& expression) {
                         std::optional<Lifetime> lf{};
                         if (body.anonymous) {
-                            std::cout << "anon" << std::endl;
                             lf.emplace(ir.beginLifetime());
                         }
                         assignBinding(value);
@@ -1479,7 +1592,6 @@ struct IRVisitor {
 
         std::cout << "got both " << function->definition->name.value
                   << std::endl;
-        fmt::println("b {}", function->definition->body);
 
         auto ret = (*this)(function->definition->body);
         if (!isNever(ret)) {
@@ -1490,15 +1602,16 @@ struct IRVisitor {
             builder->CreateRet(copy(ret));
         }
         cleanupStack.clear();
-        if (llvm::verifyFunction(*function->asLLVM, &llvm::outs())) {
-            std::cout << "error found" << std::endl;
-            throw "error found";
-        }
+        // if (llvm::verifyFunction(*function->asLLVM, &llvm::outs())) {
+        //     std::cout << "error found" << std::endl;
+        //     throw "error found";
+        // }
     }
 
     void operator()(TypeMonomorph* type) {}
 
-    void emitMain(ast::Expression&& mainBody) {
+    void emitMain(ast::FunctionDeclaration* mainFunction) {
+        currentFunction = mainFunction;
         functions["rtAlloc"] = createSignature(allocFunc, "rtAlloc");
         functions["rtMove"] = createSignature(moveFunc, "rtMove");
         functions["rtSlice"] = createSignature(sliceFunc, "rtSlice");
@@ -1527,17 +1640,18 @@ struct IRVisitor {
         llvmFunc->insert(llvmFunc->end(), mainBlock);
         builder->SetInsertPoint(mainBlock);
         std::cout << "generating body..." << std::endl;
-        auto result = (*this)(mainBody);
+        auto result = (*this)(mainFunction->body);
         if (!isNever(result)) {
             builder->CreateRet(result);
         }
-        if (llvm::verifyFunction(*llvmFunc, &llvm::outs())) {
-            std::cout << "error found" << std::endl;
-            throw "error found";
-        }
+        // if (llvm::verifyFunction(*llvmFunc, &llvm::outs())) {
+        //     std::cout << "error found" << std::endl;
+        //     throw "error found";
+        // }
         while (signatureStack.size() > 0) {
             auto func = signatureStack.back();
             signatureStack.pop_back();
+            currentFunction = func->definition;
             (*this)(func);
         }
     }
@@ -1553,14 +1667,12 @@ struct IRVisitor {
             return "";
         }
 
-        fmt::println("name list");
-        std::string name{"["};
+        std::string name{"<"};
         for (auto& type : named) {
-            fmt::println("in loop {}", type.index());
             name.append(nameOf(type));
-            name.append("$");
+            name.append(",");
         }
-        name.append("]");
+        name.append(">");
         return std::move(name);
     }
 
@@ -1577,7 +1689,7 @@ struct IRVisitor {
             name.append(property);
             name.append(":");
             name.append(nameOf(type));
-            name.append("$");
+            name.append(",");
         }
         name.append("}");
         return std::move(name);
@@ -1587,14 +1699,14 @@ struct IRVisitor {
         std::string name{"("};
         for (auto& type : tuple.fields) {
             name.append(nameOf(type));
-            name.append("$");
+            name.append(",");
         }
         name.append(")");
         return std::move(name);
     }
 
     std::string nameOf(type::BuiltIn* const& builtIn) {
-        return builtIn->name;
+        return std::string{builtIn->name};
     }
 
     std::string nameOf(type::Parameter const& parameter) {
@@ -1833,3 +1945,90 @@ struct IRVisitor {
         return Lifetime{*this};
     }
 };
+
+class Compiler {
+    IRVisitor ir;
+    // TypeCheck
+};
+
+std::optional<std::tuple<std::unique_ptr<llvm::LLVMContext>, std::unique_ptr<llvm::Module>, llvm::TargetMachine*>> compile(std::vector<Module*>& modules) {
+    auto ctx = std::make_unique<llvm::LLVMContext>();
+    auto mod = std::make_unique<llvm::Module>("my cool jit", *ctx);
+    auto builder = std::make_unique<llvm::IRBuilder<>>(*ctx);
+
+    type::integer.asLLVM = llvm::Type::getInt32Ty(*ctx);
+    type::character.asLLVM = llvm::Type::getInt8Ty(*ctx);
+    type::null.asLLVM = llvm::StructType::create(*ctx, {}, "null");
+    type::boolean.asLLVM = llvm::Type::getInt1Ty(*ctx);
+    type::ptr.asLLVM = llvm::PointerType::get(*ctx, 0);
+    type::floating.asLLVM = llvm::Type::getDoubleTy(*ctx);
+
+    std::unordered_map<std::string, type::BuiltIn*> builtInTypes{
+        {"int", &type::integer},
+        {"null", &type::null},
+        {"bool", &type::boolean},
+        {"ptr", &type::ptr},
+        {"char", &type::character},
+        {"float", &type::floating},
+    };
+    
+    TypeChecker tc{
+        builtInTypes,
+    };
+
+    tc.check(modules);
+
+    if (!tc.log.errorsAreEmpty()) {
+        tc.log.printDiagnosticsTo(std::cerr);
+        return {};
+    }
+
+    tc.implementationScope.currentBounds.block = nullptr;
+    tc.implementationScope.currentBounds.local = nullptr;
+    IRVisitor ir{
+        std::move(ctx), std::move(builder),
+        std::move(mod), builtInTypes,   std::move(tc.implementationScope)};
+
+    ir.vecDeclaration = tc.typeScope.at("std::Vector");
+    ir.stringDeclaration = tc.typeScope.at("std::String");
+    fmt::println("here");
+    ir.allocFunc = Function{tc.funcScope.at("std::rtAlloc"), {}};
+    ir.sliceFunc = Function{tc.funcScope.at("std::rtSlice"), {}};
+    ir.freeFunc = Function{tc.funcScope.at("std::rtFree"), {}};
+    ir.moveFunc = Function{tc.funcScope.at("std::rtMove"), {}};
+    fmt::println("aaaa");
+    ir.copyDeclaration = tc.traitScope.at("std::Copy");
+    ir.dropDeclaration = tc.traitScope.at("std::Drop");
+    ir.modules = &modules;
+
+    auto targetTriple = llvm::sys::getDefaultTargetTriple();
+
+    llvm::InitializeAllTargetInfos();
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetMCs();
+    llvm::InitializeAllAsmParsers();
+    llvm::InitializeAllAsmPrinters();
+
+    std::string targetErr;
+    auto target = llvm::TargetRegistry::lookupTarget(targetTriple, targetErr);
+    if (!target) {
+        std::cerr << targetErr;
+        return {};
+    }
+
+    auto targetMachine =
+        target->createTargetMachine(targetTriple, "generic", "", {}, {});
+
+    ir.currentModule->setDataLayout(targetMachine->createDataLayout());
+    ir.currentModule->setTargetTriple(targetTriple);
+
+    auto mainBody =
+        tc.funcScope.find(modules[1]->moduleId + "::main");
+    if (mainBody == tc.funcScope.end()) {
+        std::cout << "main undefined" << std::endl;
+        throw "";
+    }
+    ir.emitMain(std::move(mainBody->second));
+
+    return {{std::move(ir.context), std::move(ir.currentModule), targetMachine}};
+}

@@ -28,12 +28,24 @@ Span Span::extendBack(size_t offset) {
     };
 }
 
+Span Span::first() {
+    return Span{
+        firstLine,          firstLine,
+        beginOffset,        beginHighlightOffset,
+        beginHighlightOffset + 1,
+    };
+}
+
 Span Span::null() {
     return Span{std::numeric_limits<size_t>::max()};
 }
 
 std::ostream& operator<<(std::ostream& stream, Red redText) {
     return stream << setRedColor << redText.text << resetColor;
+}
+
+std::ostream& operator<<(std::ostream& stream, Blue blueText) {
+    return stream << setBlueColor << blueText.text << resetColor;
 }
 
 std::ostream& operator<<(std::ostream& stream, Span const& span) {
@@ -46,7 +58,7 @@ size_t numberOfDigits(size_t number) {
     return number > 1 ? std::log10(number) + 1 : 1;
 }
 
-struct logs::SpannedMessage::Formatter {
+template <class Color> struct logs::SpannedMessage::Formatter {
     std::ostream& stream;
     Source source;
     Span span;
@@ -59,12 +71,12 @@ struct logs::SpannedMessage::Formatter {
     void printLineNumber(size_t lineNumber) const {
         stream << lineNumber + 1
                << std::string(marginWidth - numberOfDigits(lineNumber + 1), ' ')
-               << '|';
+               << "| ";
     }
 
     void printRedSquiggles() const {
         stream << std::string(span.beginHighlightOffset, ' ')
-               << Red{std::string(
+               << Color{std::string(
                       span.endHighlightOffset - span.beginHighlightOffset, '^'
                   )};
     }
@@ -76,7 +88,7 @@ struct logs::SpannedMessage::Formatter {
 
             if (lineNumber == span.firstLine &&
                 column == span.beginHighlightOffset) {
-                stream << setRedColor;
+                stream << Color::start;
             } else if (lineNumber == span.lastLine && column == span.endHighlightOffset) {
                 stream << resetColor;
             }
@@ -90,7 +102,7 @@ struct logs::SpannedMessage::Formatter {
     void print() const {
         std::string margin(marginWidth, ' ');
 
-        stream << margin << '|' << std::endl;
+        stream << margin << "| " << std::endl;
 
         source.stream.clear();
         source.stream.seekg(span.beginOffset);
@@ -102,7 +114,7 @@ struct logs::SpannedMessage::Formatter {
             printLineNumber(currentLine);
 
             if (currentLine > span.firstLine) {
-                stream << setRedColor;
+                stream << Color::start;
             }
 
             printLine(currentLine++);
@@ -110,7 +122,7 @@ struct logs::SpannedMessage::Formatter {
             source.stream.get();
             stream << '\n';
         }
-        stream << resetColor << margin << '|';
+        stream << resetColor << margin << "| ";
 
         if (span.firstLine == span.lastLine) {
             printRedSquiggles();
@@ -118,18 +130,34 @@ struct logs::SpannedMessage::Formatter {
 
         stream << std::endl
                << margin << "@ " << source.name << ':' << span.firstLine + 1
-               << ':' << span.beginHighlightOffset + 1 << std::endl;
+               << ':' << span.beginHighlightOffset + 1 << std::endl << std::endl;
     }
 };
 
 namespace logs {
 std::ostream& operator<<(std::ostream& stream, SpannedMessage const& message) {
-    stream << Red{message.type} << ": " << message.header << std::endl;
+    switch (message.level) {
+    case Level::Error:
+        stream << Red{message.type} << ": " << message.header << std::endl;
+        break;
+
+    default:
+        stream << Blue{message.type} << ": " << message.header << std::endl;
+        break;
+    }
     message.printBodyTo(stream);
     return stream;
 }
 
 void SpannedMessage::printBodyTo(std::ostream& stream) const {
-    Formatter{stream, *this}.print();
+    switch (level) {
+    case Level::Error:
+        Formatter{stream, *this}.print();
+        break;
+
+    default:
+        Formatter<Blue>{stream, *this}.print();
+        break;
+    }
 }
 } // namespace logs

@@ -1,8 +1,8 @@
-import "other" as other
-import "third" as third
-import "test:name" as tstd
+#ifndef ICE_STD_H
+#define ICE_STD_H
 
-trait Add<T> {
+static const char* stdIce = R"(
+public trait Add<T> {
     fun add(other: T): T
 }
 
@@ -10,7 +10,7 @@ def int as Add<int> {
     fun add(other: int): int -> this + other
 }
 
-trait Multiply<T> {
+public trait Multiply<T> {
     fun multiply(other: T): T
 }
 
@@ -18,7 +18,7 @@ def int as Multiply<int> {
     fun multiply(other: int): int -> this * other
 }
 
-trait Equate<T> {
+public trait Equate<T> {
     fun eq(other: T): bool
 }
 
@@ -26,7 +26,7 @@ def int as Equate<int> {
     fun eq(other: int): bool -> this == other
 }
 
-type Vector<T> {
+public type Vector<T> {
     buffer: @ptr int,
     capacity: int,
     length: int, 
@@ -38,23 +38,9 @@ type Vector<T> {
 @extern fun rtFree(buf: @ptr int) {}
 @extern fun rtSlice(buf: @ptr int, offset: int, len: int) {}
 @extern fun rtMove(offset: int, buf: @ptr int, src: @ptr int, len: int) {}
+@extern fun rtPrint(buf: @ptr int, len: int) {}
 @extern fun dbgPrint(): int {}
 
-fun createVector<T>(size: int) {
-    Vector:<T> {
-        buffer: rtAlloc(T.size * size),
-        capacity: size,
-        length: size,
-    };
-}
-
-fun createVector<T>(size: int): Vector<T> {
-    Vector:<T> {
-        buffer: rtAlloc(T.size * size),
-        capacity: size,
-        length: size,
-    }
-}
 fun push<T>(vector: Vector<T>, item: T): Vector<T> {
     T.size;
     var vec = vector;
@@ -67,26 +53,33 @@ fun push<T>(vector: Vector<T>, item: T): Vector<T> {
     vec
 }
 
-trait Test {
-    fun num(): int
+public type String [char]
+
+def String {
+    public fun print() {
+        rtPrint(this.buffer, this.length);
+    }
 }
 
-type TestT {
-    val : int
+def String as Add<String> {
+    fun add(other: String): String -> String([..this.proto, ..other.proto])
 }
 
-def TestT {
-    fun num(): int -> this.val
-}
+def String as Equate<String> {
+    fun eq(other: String): bool {
+        if (this.length != other.length) {
+            return (0 == 1);
+        };
+        var i = 0;
+        while (i != this.length) {
+            if (this.proto[i] != other.proto[i]) {
+                return (0 == 1);
+            };
+            i = i + 1;
+        };
 
-def<T> [T] {
-    fun last(): T -> this[0]
-}
-
-fun main(): int {
-    let a = [1, 2, 3];
-    
-    other::fl::pull()
+        (0 == 0)
+    }
 }
 
 trait Copy {
@@ -118,3 +111,6 @@ def<T> [T] as Copy {
         new
     }
 }
+    )";
+
+#endif

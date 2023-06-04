@@ -64,6 +64,12 @@ struct StringLiteral {
 
     bool operator==(StringLiteral const&) const = default;
 };
+struct CharLiteral {
+    char value;
+    Span span;
+
+    bool operator==(CharLiteral const&) const = default;
+};
 
 struct EndOfFile {
     Span span;
@@ -96,7 +102,7 @@ template <String... punctuations> struct WithPunctuations {
       public:
         using Token = std::variant<
             Keyword<keywords>..., Punctuation<punctuations>..., IntegerLiteral,
-            FloatLiteral, StringLiteral, Identifier, EndOfFile>;
+            FloatLiteral, StringLiteral, CharLiteral, Identifier, EndOfFile>;
 
         Lexer(Source _source) : source(_source) {}
 
@@ -140,6 +146,11 @@ template <String... punctuations> struct WithPunctuations {
                     return token.value();
                 }
 
+                token = tryParseCharLiteral();
+                if (token) {
+                    return token.value();
+                }
+                
                 token = tryParseStringLiteral();
                 if (token) {
                     return token.value();
@@ -244,7 +255,7 @@ template <String... punctuations> struct WithPunctuations {
 
         std::optional<Token> tryParsePunctuationOrComment() {
             if (!std::ispunct(currentCharacter()) ||
-                currentCharacter() == '"') {
+                currentCharacter() == '"' || currentCharacter() == '\'') {
                 return {};
             }
 
@@ -382,6 +393,45 @@ template <String... punctuations> struct WithPunctuations {
             };
         }
 
+        std::optional<Token> tryParseCharLiteral() {
+            if (currentCharacter() != '\'') {
+                return {};
+            }
+
+            auto beginSpan = currentSpan();
+
+            getNextCharacter();
+            std::string literal{};
+
+            while (currentCharacter() != '\'') {
+                char character = getNextCharacter();
+
+                if (character == EOF) {
+                    logMessage(
+                        currentSpan().extendBack(1),
+                        "non-terminated char literal", "expected \'"
+                    );
+                    return {};
+                } else if (character == '\\') {
+                    escapeNextCharacter(literal);
+                } else {
+                    literal.push_back(character);
+                }
+            };
+            getNextCharacter();
+            if (literal.size() != 1) {
+                logMessage(
+                    beginSpan.to(currentSpan()),
+                    "wrong char literal size", "expected a single character"
+                );
+                return CharLiteral{
+                    '\0', beginSpan.to(currentSpan())};
+            }
+
+            return CharLiteral{
+                literal[0], beginSpan.to(currentSpan())};
+        }
+        
         std::optional<Token> tryParseStringLiteral() {
             if (currentCharacter() != '"') {
                 return {};

@@ -7,6 +7,8 @@
 
 #include <optional>
 #include <vector>
+#include <filesystem>
+#include <unordered_map>
 
 using Lexer = lexer::WithPunctuations<
     ",", ".", "(", ")", "[", "]", "<", ">", "<=", ">=", "->", "{", "}", ":",
@@ -14,13 +16,26 @@ using Lexer = lexer::WithPunctuations<
     "&", "@", "::">::
     Lexer<
         "fun", "type", "break", "return", "continue", "if", "while", "else",
-        "match", "let", "var", "as", "is", "trait", "def", "import">;
+        "match", "let", "var", "as", "is", "trait", "def", "import", "public", "internal">;
 
 template <class T>
 concept Token = contains<T, Lexer::Token>;
 
+struct Module;
+
 namespace ast {
 struct Expression;
+
+struct Visibility {
+    enum class Level {
+        Public,
+        Internal,
+        Private,
+    };
+
+    Span span;
+    Level level;
+};
 
 struct Path {
     Span span;
@@ -260,7 +275,7 @@ struct TypeExpression {
 
 using ExpressionValue = std::variant<
     Variable, Block, lexer::IntegerLiteral, lexer::FloatLiteral,
-    lexer::StringLiteral, TupleLiteral, StructLiteral, If, While, Match, Call,
+    lexer::StringLiteral, lexer::CharLiteral, TupleLiteral, StructLiteral, If, While, Match, Call,
     PropertyAccess, TupleFieldAccess, IndexAccess, Cast, Binary<"+">,
     Binary<"*">, Binary<"==">, Binary<"!=">, Binary<"&&">, Binary<"||">,
     Binary<">=">, Binary<"<=">, Binary<"<">, Binary<">">, Binary<"=">,
@@ -444,10 +459,12 @@ struct Signature {
     std::vector<TypeParameter> typeParameterNames;
     std::vector<Parameter> parameters;
     std::optional<TypeName> returnTypeName;
+    Visibility visibility;
 
     std::string fullName;
     std::vector<std::pair<Type, Trait>> traitBounds;
     Type returnType;
+    Module* location;
 };
 
 struct FunctionDeclaration : Signature {
@@ -463,7 +480,9 @@ struct TypeDeclaration {
     Span span;
     lexer::Identifier name;
     std::vector<TypeParameter> typeParameterNames;
+    Visibility protoVisibility;
     TypeName protoName;
+    Visibility visibility;
 
     Type proto;
     std::string fullName;
@@ -474,10 +493,13 @@ struct TraitDeclaration {
     lexer::Identifier name;
     std::vector<TypeParameter> typeParameterNames;
     std::vector<Signature> signatures;
+    Visibility visibility;
 
     std::string fullName;
     std::vector<std::pair<Type, Trait>> traitBounds;
 };
+
+
 
 struct TraitImplementation {
     Span span;
@@ -489,6 +511,8 @@ struct TraitImplementation {
     Trait trait;
     Type type;
     std::vector<std::pair<Type, Trait>> traitBounds;
+    bool invalidBounds = false;
+    Module* location;
 };
 
 struct Implementation {
@@ -505,6 +529,7 @@ struct Import {
     Span span;
     lexer::StringLiteral path;
     lexer::Identifier name;
+    Visibility visibility;
 };
 
 struct Program {
@@ -522,6 +547,30 @@ struct Program {
 #else
 #define CLANG_RUNTIME(string) string
 #endif
+
+struct Module {
+    Source source;
+    ast::Program program;
+    std::string moduleId;
+    std::filesystem::path path;
+    std::unordered_map<std::string, std::pair<size_t, ast::Visibility*>>
+        imports;
+
+    std::string_view packageName() const {
+        auto slash = std::ranges::find(moduleId, '/');
+        return {moduleId.begin(), slash};
+    }
+};
+
+
+template <> struct fmt::formatter<Trait> : formatter<std::string> {
+    auto format(Trait const& trait, auto& ctx) const {
+        if (trait.typeArguments.size() > 0) {
+            return fmt::format_to(ctx.out(), "{}{}", trait.declaration->name, fmt::join(trait.typeArguments, ","));
+        }
+        return fmt::format_to(ctx.out(), "{}", trait.declaration->name);
+    }
+};
 
 template <> struct fmt::formatter<lexer::Identifier> : formatter<std::string> {
     auto format(lexer::Identifier const& variable, auto& ctx) const {
@@ -725,6 +774,13 @@ template <>
 struct fmt::formatter<lexer::StringLiteral> : formatter<std::string> {
     auto format(lexer::StringLiteral const& string, auto& ctx) const {
         return fmt::format_to(ctx.out(), "\"{}\"", string.value);
+    }
+};
+
+template <>
+struct fmt::formatter<lexer::CharLiteral> : formatter<std::string> {
+    auto format(lexer::CharLiteral const& character, auto& ctx) const {
+        return fmt::format_to(ctx.out(), "\"{}\"", character.value);
     }
 };
 

@@ -18,6 +18,7 @@ struct Span {
     Span to(Span other);
     static Span null();
     Span extendBack(size_t offset);
+    Span first();
     bool operator==(Span const&) const = default;
 };
 
@@ -29,21 +30,36 @@ struct Source {
 };
 
 static constexpr auto setRedColor = "\u001b[31;1m";
+static constexpr auto setBlueColor = "\u001b[36;1m";
 static constexpr auto resetColor = "\u001b[0m";
 
 struct Red {
+    static constexpr auto start = "\u001b[31;1m";
+    std::string_view text;
+};
+
+struct Blue {
+    static constexpr auto start = "\u001b[36;1m";
     std::string_view text;
 };
 
 std::ostream& operator<<(std::ostream& stream, Red redText);
 
+
 namespace logs {
+enum class Level {
+    Error,
+    Info
+};
+
 struct SpannedMessage {
     Source source;
     Span span;
     std::string_view type;
     std::string header;
+    Level level = Level::Error;
 
+    template <class Color = Red>
     struct Formatter;
 
     void printBodyTo(std::ostream&) const;

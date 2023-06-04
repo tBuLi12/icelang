@@ -52,11 +52,21 @@ struct ImplRef {
 namespace type {
 struct BuiltIn {
     llvm::Type* asLLVM;
-    std::string name;
+    std::string_view name;
+
+
     bool operator==(BuiltIn const& other) const {
         return name == other.name;
     };
 };
+
+static BuiltIn integer = BuiltIn{nullptr, "int"};
+static BuiltIn null = BuiltIn{nullptr, "null"};
+static BuiltIn boolean = BuiltIn{nullptr, "bool"};
+static BuiltIn ptr = BuiltIn{nullptr, "ptr"};
+static BuiltIn character = BuiltIn{nullptr, "char"};
+static BuiltIn floating = BuiltIn{nullptr, "float"};
+
 struct Struct {
     std::vector<std::pair<std::string, Type>> properties;
     bool operator==(Struct const& other) const;

@@ -1,12 +1,13 @@
-#include "./IREmmiter/IREmmiter.cpp"
+#include "./IREmmiter/compiler.h"
 #include "./parser/parse.h"
 #include <filesystem>
 #include <fstream>
 #include <range/v3/all.hpp>
 #include <ranges>
+#include "iceStd.h"
 
 struct Package {
-    std::filesystem::path path;
+    std::optional<std::filesystem::path> path;
     std::string id;
     std::string pathStr;
 };
@@ -14,7 +15,8 @@ struct Package {
 Package packageIdFromPath(std::string_view pathStr) {
     std::filesystem::path path{pathStr};
     auto id = path.filename().stem().string();
-    return Package{std::move(path), std::move(id), path.string()};
+    auto pathAsStr = path.string();
+    return Package{std::move(path), std::move(id), std::move(pathAsStr)};
 }
 
 std::vector<std::string> splitBySlash(std::string_view str) {
@@ -37,12 +39,15 @@ std::pair<std::string, std::filesystem::path> moduleIdFromPath(
     std::string_view tail{path};
     std::string_view pckgName = current.packageName();
     std::vector<std::string> idSegments = splitBySlash(current.moduleId);
+    
     if (idSegments.size() > 1)
         idSegments.pop_back();
 
     if (colon != path.end()) {
         pckgName = {path.begin(), colon};
-        curPath = packages[std::string{pckgName}].path.parent_path();
+        if (!packages[std::string{pckgName}].path) return std::pair<std::string, std::filesystem::path>{pckgName, std::filesystem::path{}};
+
+        curPath = packages[std::string{pckgName}].path->parent_path();
         idSegments = {std::string{pckgName}};
         tail = {++colon, path.end()};
     }
@@ -52,7 +57,7 @@ std::pair<std::string, std::filesystem::path> moduleIdFromPath(
     std::cout << "got segments " << segments.size() << std::endl;
 
     if (segments.size() > 0 && !(segments.front() == "." || segments.front() == "..")) {
-        curPath = packages[std::string{pckgName}].path.parent_path();
+        curPath = packages[std::string{pckgName}].path->parent_path();
         idSegments.resize(1);
     }
 
@@ -99,52 +104,54 @@ int main(int argc, char* argv[]) {
         throw "";
     }
 
-    auto ctx = std::make_unique<llvm::LLVMContext>();
-    auto mod = std::make_unique<llvm::Module>("my cool jit", *ctx);
-    auto builder = std::make_unique<llvm::IRBuilder<>>(*ctx);
-
-    auto intt = llvm::Type::getInt32Ty(*ctx);
-    auto nullt = llvm::StructType::create(*ctx, {}, "null");
-    auto boolt = llvm::Type::getInt1Ty(*ctx);
-    auto ptr = llvm::PointerType::get(*ctx, 0);
-
-    std::unordered_map<std::string, type::BuiltIn*> builtInTypes{
-        {"int", new type::BuiltIn{intt, "int"}},
-        {"null", new type::BuiltIn{nullt, "null"}},
-        {"bool", new type::BuiltIn{boolt, "bool"}},
-        {"ptr", new type::BuiltIn{ptr, "ptr"}},
-    };
-
     std::unordered_map<std::string, Package> packages{};
     std::vector<std::ifstream*> files{};
     std::vector<Module*> modules{};
 
+    packages["std"] = Package{{}, "std", "std"};
+
     std::optional<std::string> fid;
     for (size_t i = 1; i < argc; ++i) {
         auto package = packageIdFromPath(argv[i]);
+            std::cout <<  " GET PCKG " << package.pathStr << std::endl;
         if (!fid) {
             fid = package.id;
         }
-        packages[package.id] = std::move(package);
+        if (packages.find(package.id) != packages.end()) {
+            std::cout <<  "duplicate package" << std::endl;
+        } else {
+            packages[package.id] = std::move(package);
+        }
     }
 
+    std::stringstream stdLib{stdIce};
+    Source stdsource{stdLib, "std"};
+    auto [program, log] = parseProgram(stdsource);
+    if (!log.errorsAreEmpty()) {
+        log.printDiagnosticsTo(std::cerr);
+    }
+    modules.emplace_back(new Module{
+            stdsource, std::move(program), "std"});
+
     for (auto& [_, package] : packages) {
+        if (!package.path) continue;
         files.push_back(new std::ifstream{});
-        files.back()->open(package.path, std::ios::binary);
+        files.back()->open(*package.path, std::ios::binary);
         if (!*files.back()) {
-            std::cout << package.path << " not found2" << std::endl;
+            std::cout << *package.path << " not found2" << std::endl;
             throw "";
         }
         Source source{*files.back(), package.pathStr};
+            std::cout << package.pathStr << " IS THE path" << std::endl;
         auto [program, log] = parseProgram(source);
         if (!log.errorsAreEmpty()) {
-            log.printDiagnosticsTo(std::cout);
+            log.printDiagnosticsTo(std::cerr);
         }
         modules.emplace_back(new Module{
             source, std::move(program), package.id});
     }
 
-    for (size_t idx = 0; idx < modules.size(); ++idx) {
+    for (size_t idx = 1; idx < modules.size(); ++idx) {
         std::cout << "processing module " << idx << std::endl;
         for (auto& import : modules[idx]->program.imports) {
             std::cout << "processing import " << import.path.value << std::endl;
@@ -152,8 +159,11 @@ int main(int argc, char* argv[]) {
                 packages, import.path.value, *modules[idx]
             );
             std::cout << "resolved" << std::endl;
-            if (std::ranges::find(modules, moduleId, &Module::moduleId) !=
+            auto maybeMod = std::ranges::find(modules, moduleId, &Module::moduleId);
+            if (maybeMod !=
                 modules.end()) {
+                modules[idx]->imports[import.name.value] = {
+                    std::distance(modules.begin(), maybeMod), &import.visibility};
                 continue;
             }
 
@@ -166,86 +176,27 @@ int main(int argc, char* argv[]) {
             Source source{*files.back(), import.path.value};
             auto [program, log] = parseProgram(source);
             if (!log.errorsAreEmpty()) {
-                log.printDiagnosticsTo(std::cout);
+                log.printDiagnosticsTo(std::cerr);
             }
 
-            modules[idx]->imports[import.name.value] = modules.size();
             modules.push_back(new Module{
                 source, std::move(program), moduleId, std::move(path)});
         }
     }
-    
-    std::cout <<  "donFFe" << std::endl;
 
-    for (auto& [_, pkg] : packages) {
-        std::cout << pkg.id  << std::endl;
-    }
-        std::cout << std::endl;
 
-    for (auto& mod : modules) {
-        // mod.
-        std::cout << mod->moduleId
-                   << std::endl;
-    }
-    // return 0;
-    TypeChecker tc{
-        builtInTypes,
-    };
-    std::cout << "parsing done" << std::endl;
-
-    tc.check(modules);
-
-    tc.implementationScope.currentBounds.block = nullptr;
-    tc.implementationScope.currentBounds.local = nullptr;
-    IRVisitor ir{
-        Source {*files.front(), packages[*fid].pathStr}, std::move(ctx), std::move(builder),
-        std::move(mod), builtInTypes,   std::move(tc.implementationScope)};
-
-    ir.vecDeclaration = tc.typeScope.at("std::Vector");
-    fmt::println("here");
-    ir.allocFunc = Function{tc.funcScope.at("std::rtAlloc"), {}};
-    ir.sliceFunc = Function{tc.funcScope.at("std::rtSlice"), {}};
-    ir.freeFunc = Function{tc.funcScope.at("std::rtFree"), {}};
-    ir.moveFunc = Function{tc.funcScope.at("std::rtMove"), {}};
-    fmt::println("aaaa");
-    ir.copyDeclaration = tc.traitScope.at("std::Copy");
-    ir.dropDeclaration = tc.traitScope.at("std::Drop");
-    ir.modules = &modules;
-
-    auto targetTriple = llvm::sys::getDefaultTargetTriple();
-
-    llvm::InitializeAllTargetInfos();
-    llvm::InitializeAllTargets();
-    llvm::InitializeAllTargetMCs();
-    llvm::InitializeAllAsmParsers();
-    llvm::InitializeAllAsmPrinters();
-
-    std::string targetErr;
-    auto target = llvm::TargetRegistry::lookupTarget(targetTriple, targetErr);
-    if (!target) {
-        std::cerr << targetErr;
-        return 1;
-    }
-
-    auto targetMachine =
-        target->createTargetMachine(targetTriple, "generic", "", {}, {});
-
-    ir.currentModule->setDataLayout(targetMachine->createDataLayout());
-    ir.currentModule->setTargetTriple(targetTriple);
-
-    auto mainBody =
-        tc.funcScope.find(modules.front()->moduleId + "::main");
-    if (mainBody == tc.funcScope.end()) {
-        std::cout << "main undefined" << std::endl;
-        throw "";
-    }
-    ir.emitMain(std::move(mainBody->second->body));
-
+    auto result = compile(modules);
     for (auto f : files) {
         f->close();
     }
 
-    ir.currentModule->print(llvm::outs(), nullptr);
+    if (!result) {
+        return 1;
+    }
+
+    auto [llvmContext, llvmModule, targetMachine] = std::move(*result);
+
+    llvmModule->print(llvm::outs(), nullptr);
 
     llvm::legacy::PassManager passManager{};
 
@@ -262,8 +213,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    passManager.run(*ir.currentModule);
+    passManager.run(*llvmModule);
     outputFile.flush();
-
+        std::cerr << "done" << std::endl;
     return 0;
 }

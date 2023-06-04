@@ -131,6 +131,7 @@ template <class T> constexpr bool isRule(Rule<T>) {
 template <class T> constexpr bool nonNullable = true;
 template <class T> constexpr bool nonNullable<std::optional<T>> = false;
 template <class T> constexpr bool nonNullable<OptionOrDefault<T>> = false;
+template <> constexpr bool nonNullable<Visibility> = false;
 template <class... Ts>
 constexpr bool nonNullable<std::tuple<Ts...>> = (nonNullable<Ts> || ...);
 template <class... Ts>
@@ -159,6 +160,8 @@ template <> constexpr String expected<FunctionBody> = "{ or ->";
 template <> constexpr String expected<PrefixGuard> = "a guard";
 template <> constexpr String expected<Annotation> = "an annotation";
 template <> constexpr String expected<Path> = "an identifier";
+template <> constexpr String expected<Visibility> = "a visibility specifier";
+template <> constexpr String expected<FunctionDeclaration> = "fun";
 
 template <class L, class... ops>
 constexpr String expected<PrecedenceGroup<L, ops...>> = expected<L>;
@@ -171,6 +174,7 @@ template <class T, class... Ts>
     requires(nonNullable<T>)
 constexpr String expected<std::tuple<T, Ts...>> = expected<T>;
 
+template <> constexpr String expected<FunctionWithVisibility> = expected<std::tuple<Visibility, FunctionDeclaration>>;
 template <class T> constexpr String expected<std::optional<T>> = expected<T>;
 template <class T> constexpr String expected<OptionOrDefault<T>> = expected<T>;
 template <class T> constexpr String expected<std::vector<T>> = expected<T>;
@@ -685,6 +689,16 @@ class Parser : public logs::MessageLog {
         );
     }
 
+    std::optional<Visibility> parse(Rule<Visibility>) {
+        if (auto keyword = parse("public"_kw)) {
+            return Visibility{spanOf(*keyword), Visibility::Level::Public};
+        }
+        if (auto keyword = parse("internal"_kw)) {
+            return Visibility{spanOf(*keyword), Visibility::Level::Internal};
+        }
+        return Visibility{Span::null(), Visibility::Level::Private};
+    }
+
     std::optional<Path> parse(Rule<Path>) {
         auto first = parse(ident);
         if (!first)
@@ -721,11 +735,21 @@ class Parser : public logs::MessageLog {
         return Block{span, std::move(items), !hasTrailing};
     }
 
+    std::optional<FunctionDeclaration> parse(Rule<FunctionWithVisibility>) {
+        auto parsed = parse(visibility + functionDeclaration);
+        if (!parsed) {
+            return {};
+        }
+        auto [vis, func] = std::move(parsed->value);
+        func.visibility = std::move(vis);
+        return std::move(func);
+    }
+
     std::optional<std::variant<Implementation, TraitImplementation>>
     parseImplementation() {
         auto parsed = parse(
             "def"_kw + typeParameterList + typeName +
-            option("as"_kw + traitName) + "{"_p + list(functionDeclaration) +
+            option("as"_kw + traitName) + "{"_p + list(Rule<FunctionWithVisibility>{}) +
             "}"_p
         );
         if (!parsed) {
@@ -756,18 +780,6 @@ class Parser : public logs::MessageLog {
 
         while (!parse(Rule<lexer::EndOfFile>{})) {
             try {
-                if (auto function = parse(functionDeclaration)) {
-                    program.functions.push_back(std::move(*function));
-                    continue;
-                }
-                if (auto type = parse(typeDeclaration)) {
-                    program.typeDeclarations.push_back(std::move(*type));
-                    continue;
-                }
-                if (auto trait = parse(traitDeclaration)) {
-                    program.traitDeclarations.push_back(std::move(*trait));
-                    continue;
-                }
                 if (auto implementation = parseImplementation()) {
                     std::visit(
                         match{
@@ -785,7 +797,24 @@ class Parser : public logs::MessageLog {
                     );
                     continue;
                 }
+                auto vis = parse(visibility);
+                if (auto function = parse(functionDeclaration)) {
+                    function->visibility = *vis;
+                    program.functions.push_back(std::move(*function));
+                    continue;
+                }
+                if (auto type = parse(typeDeclaration)) {
+                    type->visibility = *vis;
+                    program.typeDeclarations.push_back(std::move(*type));
+                    continue;
+                }
+                if (auto trait = parse(traitDeclaration)) {
+                    trait->visibility = *vis;
+                    program.traitDeclarations.push_back(std::move(*trait));
+                    continue;
+                }
                 if (auto imp = parse(import)) {
+                    imp->visibility = *vis;
                     program.imports.push_back(std::move(*imp));
                     continue;
                 }
