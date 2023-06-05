@@ -318,25 +318,35 @@ struct IRVisitor {
     llvm::Value* indexVector(Value vector, Value index, Span accessSpan) {
         llvm::Value* vecLen = builder->CreateExtractValue(vector, {0, 2});
 
-        auto isOutOfBounds = builder->CreateICmpSGE(index, vecLen);
+        fmt::println("into422 index access");
+        auto indexTooLarge = builder->CreateICmpSGE(index, vecLen);
+        fmt::println("into433 index access");
+        auto indexTooSmall = builder->CreateICmpSLT(index, getInt(32, 0));
+        fmt::println("into444 index access");
+        auto isOutOfBounds = builder->CreateOr({indexTooLarge, indexTooSmall});
+        fmt::println("into455 index access");
         auto outOfBounds = createBlock("outofbounds");
         auto inBounds = createBlock("inbounds");
         builder->CreateCondBr(isOutOfBounds, outOfBounds, inBounds);
         appendAndSetInsertTo(outOfBounds);
+        fmt::println("into466 index access");
         std::stringstream error{};
         logs::SpannedMessage msg{currentFunction->location->source, accessSpan, "", ""};
         msg.printBodyTo(error);
         auto errorMessage =
             builder->CreateGlobalStringPtr(error.str(), "oobError");
+        fmt::println("into477 index access");
         builder->CreateCall(rtOobError, {errorMessage, index, vecLen});
         builder->CreateBr(inBounds);
         appendAndSetInsertTo(inBounds);
+        fmt::println("into488 index access");
 
         llvm::Value* bufPtr = builder->CreateExtractValue(vector, {0, 0});
-        std::cout << std::get<type::Named>(vector.type).declaration
-                  << std::endl;
+        fmt::println("into499 index access");
+        fmt::println("into499 index access {}", with(*blockTypeArguments, *typeArguments, vector.type));
+        fmt::println("into400 index access");
         auto elemType =
-            asLLVM(std::get<type::Named>(vector.type).typeArguments[0]);
+            asLLVM(std::get<type::Named>(with(*blockTypeArguments, *typeArguments, vector.type)).typeArguments[0]);
         std::cout << "uuu" << std::endl;
         return builder->CreateInBoundsGEP(elemType, bufPtr, {index});
     }
@@ -352,6 +362,7 @@ struct IRVisitor {
             return never;
 
         llvm::Type* elementType = asLLVM(access.elementType);
+        fmt::println("into45 index access");
         auto elementPtr = indexVector(lhs, index, access.span);
         fmt::println("into3 index access");
         llvm::Value* value = builder->CreateLoad(elementType, elementPtr);
@@ -1054,13 +1065,16 @@ struct IRVisitor {
             }
             ++i;
         }
+        auto resolvedThis = thisType;
+        if (resolvedThis)
+            resolvedThis = with(*blockTypeArguments, *this->typeArguments, *thisType);
 
         auto func = new FunctionMonomorph{
             llvmFunc,
             function.declaration,
             with(*blockTypeArguments, *typeArguments, function.typeArguments),
             with(*blockTypeArguments, *this->typeArguments, blockTArgs),
-            thisType,
+            resolvedThis,
         };
         return func;
     }
@@ -1085,6 +1099,9 @@ struct IRVisitor {
 
         auto& func = functions[name];
         if (!func) {
+            if (target.name.value == "copy") {
+                fmt::println("requesting copy impl for type {}", thisValue.type);
+            }
             func = createSignature(
                 Function{&target, typeArguments}, name, thisValue.type,
                 impl.typeArguments
@@ -1607,6 +1624,14 @@ struct IRVisitor {
         }
         std::cout << "CHECK FUNC: " << function->definition->name.value
                   << std::endl;
+        
+        for (auto& t : function->blockTypeArguments) {
+            fmt::println("block {}", t);
+        }
+
+        for (auto& t : function->typeArguments) {
+            fmt::println("local {}", t);
+        }
 
         auto entry = createBlock("entry");
         function->asLLVM->insert(function->asLLVM->end(), entry);

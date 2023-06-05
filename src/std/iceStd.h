@@ -121,7 +121,7 @@ def<T> [T] as Copy {
         };
         var i = 0;
         while (i != this.length) {
-            new[i] = this[i];
+            ~new[i] = this[i];
             i = i + 1;
         };
         new

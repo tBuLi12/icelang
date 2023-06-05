@@ -863,7 +863,7 @@ constexpr std::array<std::pair<std::string_view, std::string_view>, 12>
         {"-", "std::Substract"},
     }};
 
-struct VariableScope : std::vector<std::unordered_map<std::string, size_t>> {
+struct VariableScope : std::vector<std::pair<size_t, std::unordered_map<std::string, size_t>>> {
 
     std::vector<ast::Binding> bindings;
 
@@ -874,8 +874,11 @@ struct VariableScope : std::vector<std::unordered_map<std::string, size_t>> {
     bool matchedFieldWasAnonymous;
 
     void add(std::string const& name, Type type, bool isMutable = false) {
-        if (name.length() > 0)
-            back()[name] = bindings.size();
+        if (name.length() > 0) {
+            back().second[name] = bindings.size();
+        } else {
+            ++back().first;
+        }
         bindings.push_back({{}, type, isMutable});
     }
 
@@ -885,8 +888,8 @@ struct VariableScope : std::vector<std::unordered_map<std::string, size_t>> {
 
     std::optional<size_t> operator[](std::string const& name) {
         for (auto& scope : *this) {
-            auto binding = scope.find(name);
-            if (binding != scope.end()) {
+            auto binding = scope.second.find(name);
+            if (binding != scope.second.end()) {
                 return binding->second;
             }
         }
@@ -918,18 +921,18 @@ struct VariableScope : std::vector<std::unordered_map<std::string, size_t>> {
     }
 
     void enter() {
-        push_back({});
+        push_back({0, {}});
     }
 
     void exit(size_t controlFlowDepth) {
         std::cout << "hmm - " << size() << std::endl;
-        for (auto [_, index] : back()) {
+        for (auto [_, index] : back().second) {
             if (bindings[index].lastUse.controlFlowDepth == controlFlowDepth &&
                 bindings[index].lastUse.usee) {
                 bindings[index].lastUse.usee->mayMove = true;
             }
         }
-        bindings.resize(bindings.size() - back().size());
+        bindings.resize(bindings.size() - back().second.size() - back().first);
         pop_back();
     }
 };
@@ -1560,7 +1563,7 @@ struct TypeChecker {
         }
         scope.enter();
         for (auto& parameter : function.parameters) {
-            if (scope.back().find(parameter.name.value) != scope.back().end()) {
+            if (scope.back().second.find(parameter.name.value) != scope.back().second.end()) {
                 logError(parameter.name.span, "duplicate binding", "{} has already been declared in this scope", parameter.name.value);
                 continue;
             }
@@ -2616,7 +2619,7 @@ struct TypeChecker {
                                     "a vector pattern"
                                 );
                             } else if (rest.binding) {
-                                if (check.scope.back().find(rest.binding->value) != check.scope.back().end()) {
+                                if (check.scope.back().second.find(rest.binding->value) != check.scope.back().second.end()) {
                                     check.logError(rest.binding->span, "duplicate binding", "{} has already been declared in this scope", rest.binding->value);
                                     return;
                                 }
@@ -2830,8 +2833,8 @@ struct TypeChecker {
                     auto type = (*this)(binding.initalValue);
                     CheckPattern{*this, true, true}(binding.binding, type);
                     (*this)(*loop.body);
-                    --controlFlowDepth;
                     scope.exit(controlFlowDepth);
+                    --controlFlowDepth;
                 },
             },
             loop.condition->value
