@@ -270,7 +270,7 @@ struct IRVisitor {
     }
 
     Value operator()(ast::Return&& _return) {
-        Value value = _return.value ? (*this)(*_return.value) : null();
+        Value value = _return.value ? copy(take(*_return.value)) : null();
         topLevelLifetime->end();
         builder->CreateRet(value);
         return never;
@@ -426,7 +426,7 @@ struct IRVisitor {
                 
                 llvm::Value* element =
                     builder->CreateInBoundsGEP(elemType, ptr, {lengths[i]});
-                builder->CreateStore(release(copy(values[i])), element);
+                builder->CreateStore(copy(release(values[i])), element);
             }
             fmt::println("will aaa {}", nOfElems);
         }
@@ -931,8 +931,14 @@ struct IRVisitor {
                                 : take(std::get<ast::Expression>(item.value));
         ast::Expression* expression = std::get_if<ast::Expression>(&item.value);
         if (expression && dropResult) {
-            if (value.owner.index() == 0)
+            std::cout << "done with block item" << std::endl;
+            if (value.owner.index() == 0) {
+                fmt::println("DROP IT {}", value.type);
                 drop(value);
+            } else {
+            std::cout << "Nah" << std::endl;
+
+            }
         }
         return value;
     }
@@ -1250,7 +1256,7 @@ struct IRVisitor {
                         if (args[i].owner.index() == 0)
                             drop(args[i]);
                     }
-                    fmt::println("EMIT call33");
+                    fmt::println("EMIT call33 {}", access.property.value);
 
                     return {result, {}, call.type};
                 },
@@ -1341,7 +1347,7 @@ struct IRVisitor {
 
             temporaryCleanup[std::get<Temp>(value.owner).index].asLLVM =
                 nullptr;
-            value.owner = {};
+            value.owner = std::monostate{};
         }
         return value;
     }
@@ -1849,6 +1855,10 @@ struct IRVisitor {
                     }
                     indices.pop_back();
                 },
+                [](type::Parameter&) {
+                    fmt::println("this is rly bad cpy");
+                    throw "";
+                },
                 [](auto const&) {},
             },
             type
@@ -1885,6 +1895,10 @@ struct IRVisitor {
                     }
                     indices.pop_back();
                 },
+                [](type::Parameter&) {
+                    fmt::println("this is rly bad");
+                    throw "";
+                },
                 [](auto const&) {},
             },
             type
@@ -1912,22 +1926,24 @@ struct IRVisitor {
     }
 
     Value copy(Value value) {
-        std::cout << "COPY? " << value.type << std::endl;
+        auto resolvedType = 
+            with(*blockTypeArguments, *typeArguments, value.type);
+        std::cout << "COPY? " << resolvedType << std::endl;
         if (value.owner.index() == 0) {
             fmt::println("No, it's owned");
             return value;
         }
 
         std::cout << value.owner.index() << " copying value of type "
-                  << value.type << std::endl;
+                  << resolvedType << std::endl;
         if (auto copyImpl =
-                implScope.tryFind(value.type, Trait{copyDeclaration, {}})) {
+                implScope.tryFind(resolvedType, Trait{copyDeclaration, {}})) {
             std::vector<Value> args;
 
             return {
                 callTraitMethod(value, 0, {}, copyImpl.value(), args),
                 {},
-                value.type,
+                resolvedType,
             };
         }
 
@@ -1961,20 +1977,22 @@ struct IRVisitor {
     void drop(Value value) {
         if (!value.asLLVM)
             return;
+        auto resolvedType = 
+            with(*blockTypeArguments, *typeArguments, value.type);
         if (auto dropImpl =
-                implScope.tryFind(value.type, Trait{dropDeclaration, {}})) {
+                implScope.tryFind(resolvedType, Trait{dropDeclaration, {}})) {
             std::vector<Value> args;
-            auto alloca = createEntryBlockAlloca(asLLVM(value.type));
+            auto alloca = createEntryBlockAlloca(asLLVM(resolvedType));
             builder->CreateStore(value, alloca);
             value.asLLVM = alloca;
             callTraitMethod(
-                {value, 0, value.type}, 0, {}, dropImpl.value(), args
+                {value, 0, resolvedType}, 0, {}, dropImpl.value(), args
             );
             return;
         }
 
         std::vector<unsigned int> indices{};
-        dropInner(value, value.type, indices);
+        dropInner(value, resolvedType, indices);
     }
 
     Value take(ast::Expression& expression) {

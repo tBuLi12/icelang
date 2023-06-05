@@ -91,7 +91,7 @@ def<T> [T] {
     public mut pop(): T {
         let popped = ~this[this.length - 1];
         this.length = this.length - 1;
-        return popped;
+        popped
     }
 }
 
