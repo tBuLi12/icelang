@@ -26,6 +26,10 @@ def int as Equate<int> {
     fun eq(other: int): bool -> this == other
 }
 
+public trait Into<T> {
+    fun into(): T
+}
+
 public type Vector<T> {
     buffer: @ptr int,
     capacity: int,
@@ -80,6 +84,10 @@ def String as Equate<String> {
 
         (0 == 0)
     }
+}
+
+def<T> [T] {
+    public fun length(): int -> this.length
 }
 
 trait Copy {

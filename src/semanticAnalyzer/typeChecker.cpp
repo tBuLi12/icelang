@@ -418,7 +418,7 @@ struct Intersect {
 
     void operator()(type::Named const& left, type::Named const& right) {
         if (left.declaration != right.declaration) {
-            ok = true;
+            ok = false;
         }
         for (auto&& [t1, t2] :
              views::zip(left.typeArguments, right.typeArguments)) {
@@ -717,20 +717,18 @@ struct ImplementationScope {
         if (boundCmp == ImplSpan::Disjoint)
             return ImplSpan::Disjoint;
 
-        for (auto& param : is.parameters) {
-            if (param) {
-                std::cout << *param << std::endl;
-            } else {
-                std::cout << "nope" << std::endl;
-            }
-        }
-
         bool lMore = is.leftIsMoreSpecialized();
         bool rMore = is.rightIsMoreSpecialized();
 
         std::cout << "structural compare " << rMore << lMore << std::endl;
         if (lMore && rMore)
             return boundCmp;
+        
+        if (impl->typeParameterNames.size() == 0)
+            return ImplSpan::Lesser;
+        if (other->typeParameterNames.size() == 0)
+            return ImplSpan::Greater;
+
         if (lMore) {
             if (boundCmp == ImplSpan::Equal || boundCmp == ImplSpan::Lesser) {
                 return ImplSpan::Lesser;
@@ -752,14 +750,13 @@ struct ImplementationScope {
         ImplementationNode node{impl, {}};
         auto current = nodes.begin();
         auto end = nodes.end();
-        // std::vector<>
         while (current != end) {
             switch (compare(impl, current->impl)) {
             case ImplSpan::Overlapping:
                 errors.push_back(logs::SpannedMessage{
                     impl->location->source,
                     impl->span.first().to(impl->traitName.span),
-                    "invalid specialization", "does not specialize an existing implementations"});
+                    "invalid specialization", "does not specialize an existing implementation"});
                 errors.push_back(logs::SpannedMessage{
                     current->impl->location->source,
                     current->impl->span.first().to(current->impl->traitName.span),
@@ -781,7 +778,7 @@ struct ImplementationScope {
                 errors.push_back(logs::SpannedMessage{
                     impl->location->source,
                     impl->span.first().to(impl->traitName.span),
-                    "invalid specialization", ""});
+                    "invalid specialization", "does not specialize an existing implementation"});
                 errors.push_back(logs::SpannedMessage{
                     current->impl->location->source,
                     current->impl->span.first().to(current->impl->traitName.span),
@@ -813,11 +810,10 @@ struct ImplementationScope {
     }
 
     struct TreePrinter {
-        Source source;
         std::vector<size_t> indices{0};
         void operator()(ImplementationNode const& node) {
             std::cout << logs::SpannedMessage{
-                source, node.impl->span, "level",
+                node.impl->location->source, node.impl->span, "level",
                 fmt::format("{}", fmt::join(indices, ", "))};
             indices.push_back(0);
             ranges::for_each(node.children, *this);
@@ -826,9 +822,8 @@ struct ImplementationScope {
         }
     };
 
-    void debugTree(Source source) {
-
-        TreePrinter printer{source};
+    void debugTree() {
+        TreePrinter printer{};
         ranges::for_each(root.children, printer);
     }
 
@@ -1725,6 +1720,12 @@ struct TypeChecker {
                     expression = std::move(newExpr);
                     return type;
                 },
+                [&](ast::Cast& expr) {
+                    auto [newExpr, type] =
+                        (*this)(std::move(expr));
+                    expression = std::move(newExpr);
+                    return type;
+                },
                 [this](auto& expr) { return (*this)(expr); },
                 [this](TypedNode auto& expr) {
                     auto type = (*this)(expr);
@@ -1901,9 +1902,61 @@ struct TypeChecker {
         return type::Never{};
     }
 
-    Type operator()(ast::Cast& cast) {
-        fmt::println("not supported");
-        throw "";
+    std::pair<ast::Expression, Type> operator()(ast::Cast&& cast) {
+        auto lhs = (*this)(*cast.lhs);
+        auto target = resolve(cast.typeName);
+        if (!target) return {std::move(cast), type::Never{}};
+        if (lhs == *target) {
+            // logError(
+            //     cast.span, "",
+            //     "operator * only accepts int or float operands, found {}", type
+            // );
+            return {std::move(cast), lhs};
+        }
+
+        if (std::holds_alternative<type::BuiltIn*>(lhs) &&
+            std::holds_alternative<type::BuiltIn*>(*target)) {
+            if (lhs == &type::integer && *target == &type::floating) {
+                return {std::move(cast), &type::floating};
+            }
+            if (lhs == &type::floating && *target == &type::integer) {
+                return {std::move(cast), &type::integer};
+            }
+            logError(
+                cast.span, "invalid operands",
+                "type {} cannot be cast to type {}", lhs, *target
+            );
+            return {std::move(cast), type::Never{}};
+        }
+
+        if (!implementationScope.areSatisfied(
+                {{Type{lhs},
+                  Trait{traitScope["std::Into"], {Type{*target}}}}}
+            )) {
+            logError(
+                cast.span, "invalid operands",
+                "type {} cannot be cast to type {}", lhs, *target
+            );
+            return {std::move(cast), type::Never{}};
+        }
+
+        std::vector<ast::Expression> args{};
+        auto ref = TraitMethodRef{
+            Trait{traitScope["std::Into"], {Type{*target}}}};
+        auto access = ast::PropertyAccess{
+            Span{}, std::move(cast.lhs), {}, {}, 0, 0,
+        };
+        auto expr = ast::Expression{std::move(access)};
+        auto call = ast::Call{
+            Span{}, std::move(expr), {}, {std::move(args)}, {std::move(ref)},
+        };
+
+        auto resolvedReturnType = checkCall(
+            traitScope["std::Into"]->signatures[0], call,
+            {*target, lhs}, {}
+        );
+        call.type = resolvedReturnType;
+        return {std::move(call), std::move(resolvedReturnType)};
     }
 
     void
@@ -3134,7 +3187,7 @@ struct TypeChecker {
                         }
                     }
 
-                    std::cout << "so trait methdod " << std::endl;
+                    std::cout << "so trait methdod " << lhsType << std::endl;
                     // maybe it's a trait method
                     std::vector<std::pair<ast::TraitDeclaration*, size_t>>
                         candidates;
@@ -3433,5 +3486,6 @@ struct TypeChecker {
         for (auto& error : implementationScope.removeDuplicates()) {
             log.diagnostics.push_back(std::move(error));
         }
+        implementationScope.debugTree();
     }
 };
