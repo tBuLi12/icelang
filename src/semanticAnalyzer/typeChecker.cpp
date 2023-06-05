@@ -1440,6 +1440,13 @@ struct TypeChecker {
                     provided.returnType
                 );
             }
+
+            if (provided.isMutation != signature.isMutation) {
+                logError(
+                    provided.span,
+                    "error", "mutability does not match declaration"
+                );
+            }
         }
 
         for (ast::Signature& signature : traitImplementation.implementations) {
@@ -1504,6 +1511,10 @@ struct TypeChecker {
     }
 
     void operator()(ast::Signature& function) {
+        if (function.isMutation && !selfType) {
+            function.isMutation = false;
+            logError(function.span, "error", "mut is only allowed on methods");
+        }
         function.location = currentModule;
         size_t i = 0;
         for (auto& [_, parameter, bounds] : function.typeParameterNames) {
@@ -1544,6 +1555,9 @@ struct TypeChecker {
             typeParameters[parameter.value] = i;
             ++i;
         }
+        if (function.isMutation) {
+            scope.bindings[0].isMutable = true;
+        }
         scope.enter();
         for (auto& parameter : function.parameters) {
             if (scope.back().find(parameter.name.value) != scope.back().end()) {
@@ -1557,6 +1571,9 @@ struct TypeChecker {
         auto returnType = (*this)(function.body);
 
         scope.exit(controlFlowDepth);
+        if (function.isMutation) {
+            scope.bindings[0].isMutable = false;
+        }
 
         if (function.returnType != returnType && !isNever(returnType)) {
             logError(
@@ -1737,6 +1754,8 @@ struct TypeChecker {
         );
         return type;
     }
+
+    Type operator()(ast::TypeExpression&) { throw ""; }
 
     template <String op> Type operator()(ast::Binary<op>& binary) {
         auto lhs = (*this)(*binary.lhs);
@@ -2077,6 +2096,26 @@ struct TypeChecker {
         return type::Never{};
     }
 
+    Type operator()(ast::Prefix<"~">& op) {
+        if (currentModule->moduleId != "std") {
+            logError(
+                op.span, "invalid operator",
+                "this operator is reserved for internal use"
+            );
+        }
+        return (*this)(*op.rhs);
+    }
+
+    Type tryWriteTo(ast::Prefix<"~">& op) {
+        if (currentModule->moduleId != "std") {
+            logError(
+                op.span, "invalid operator",
+                "this operator is reserved for internal use"
+            );
+        }
+        return tryWriteTo(*op.rhs);
+    }
+
     Type operator()(ast::Prefix<"!">& op) {
         auto type = (*this)(*op.rhs);
         if (type != &type::boolean) {
@@ -2272,21 +2311,19 @@ struct TypeChecker {
 
         if (!scope[variable.name.str()]) {
             ast::NamedType typeName{Span{}, {}, variable.name, {}};
+            auto type = resolve(typeName);
+            if (!type) {
+                return {std::move(variable), type::Never{}};
+            }
             auto texpr = ast::TypeExpression{
                 Span{},
                 ast::TypeName{std::move(typeName)},
-                {},
+                *type
             };
-            auto type = (*this)(texpr);
-            return {std::move(texpr), type};
+            return {std::move(texpr), Type{type::Named{typeScope["Type"], {}}}};
         }
         auto type = (*this)(variable);
         return {std::move(variable), type};
-    }
-
-    Type operator()(ast::TypeExpression& typeExpression) {
-        typeExpression.theType = resolve(typeExpression.value) || type::Never{};
-        return type::Named{typeScope["Type"], {}};
     }
 
     Type operator()(ast::Variable& variable) {
@@ -3159,6 +3196,9 @@ struct TypeChecker {
                                     );
 
                                     auto [blockTArgs, tArgs] = inferer.get();
+                                    if (func->isMutation) {
+                                        tryWriteTo(*method.lhs);
+                                    }
                                     auto resolvedReturnType =
                                         checkCall(*func, call, blockTArgs, tArgs);
                                     method.propertyIdx = std::distance(
@@ -3288,6 +3328,9 @@ struct TypeChecker {
                     method.propertyIdx = idx;
 
                     traitTypeArguments.push_back(Type{lhsType});
+                    if (trait.declaration->signatures[idx].isMutation) {
+                        tryWriteTo(*method.lhs);
+                    }
                     auto resolvedReturnType = checkCall(
                         trait.declaration->signatures[idx], call,
                         traitTypeArguments, tArgs

@@ -13,10 +13,10 @@
 using Lexer = lexer::WithPunctuations<
     ",", ".", "(", ")", "[", "]", "<", ">", "<=", ">=", "->", "{", "}", ":",
     ":<", "/", "*", "+", "-", ";", "=", "!", "==", "!=", "&&", "||", "..", "=>",
-    "&", "@", "::">::
+    "&", "@", "::", "~">::
     Lexer<
         "fun", "type", "break", "return", "continue", "if", "while", "else",
-        "match", "let", "var", "as", "is", "trait", "def", "import", "public", "internal">;
+        "match", "let", "var", "as", "is", "trait", "def", "import", "public", "internal", "mut">;
 
 template <class T>
 concept Token = contains<T, Lexer::Token>;
@@ -269,7 +269,6 @@ struct TypeExpression {
     Span span;
     TypeName value;
 
-    Type theType;
     Type type;
 };
 
@@ -279,7 +278,7 @@ using ExpressionValue = std::variant<
     PropertyAccess, TupleFieldAccess, IndexAccess, Cast, Binary<"+">,
     Binary<"*">, Binary<"==">, Binary<"!=">, Binary<"&&">, Binary<"||">,
     Binary<">=">, Binary<"<=">, Binary<"<">, Binary<">">, Binary<"=">,
-    Binary<"/">, Binary<"-">, Prefix<"-">, Prefix<"!">, VectorLiteral,
+    Binary<"/">, Binary<"-">, Prefix<"-">, Prefix<"!">, Prefix<"~">, VectorLiteral,
     TypeExpression>;
 
 struct Expression {
@@ -455,6 +454,7 @@ struct TypeParameter {
 struct Signature {
     Span span;
     std::optional<Annotation> annotation;
+    bool isMutation;
     lexer::Identifier name;
     std::vector<TypeParameter> typeParameterNames;
     std::vector<Parameter> parameters;

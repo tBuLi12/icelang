@@ -102,6 +102,7 @@ struct PrefixGuard {};
 struct PrefixScrutinee {};
 struct FunctionBody {};
 struct FunctionWithVisibility {};
+struct Mutability {};
 
 template <class T> constexpr bool ruleFor = false;
 
@@ -133,6 +134,7 @@ constexpr auto destructure = Rule<Destructure>{};
 constexpr auto prefixGuard = Rule<PrefixGuard>{};
 constexpr auto prefixExpression = Rule<PrefixExpression>{};
 constexpr auto visibility = Rule<Visibility>{};
+constexpr auto mutability = Rule<Mutability>{};
 
 // clang-format off
 
@@ -227,6 +229,7 @@ RULE(While, whileExpression) = "while"_kw + "("_p + condition + ")"_p + expressi
 RULE(PrefixExpression, _prefixExpression) = as<Expression>(
     as<Prefix<"!">>("!"_p + prefixExpression) 
     | as<Prefix<"-">>("-"_p + prefixExpression) 
+    | as<Prefix<"~">>("~"_p + prefixExpression) 
     | ifExpression 
     | whileExpression 
     | postfixExpression
@@ -241,7 +244,7 @@ RULE(PrefixGuard, _prefixGuard) = as<Expression>(
 RULE(TypeParameter, typeParameter) = ident + optionOrDefault("is"_kw + separatedWith<"&">(traitName));
 constexpr auto typeParameterList = optionOrDefault("<"_p + separatedWith<",">(typeParameter) + ">"_p);
 
-RULE(Signature, signature) = option("@"_p + as<Annotation>(ident)) + "fun"_kw + ident +  typeParameterList + "("_p + separatedWith<",">(parameter) + ")"_p + option(":"_p + typeName);
+RULE(Signature, signature) = option("@"_p + as<Annotation>(ident)) + mutability + ident +  typeParameterList + "("_p + separatedWith<",">(parameter) + ")"_p + option(":"_p + typeName);
 RULE(TypeDeclaration, typeDeclaration) = "type"_kw + ident + typeParameterList + visibility + typeName;
 RULE(TraitDeclaration, traitDeclaration) = "trait"_kw + ident + typeParameterList + "{"_p + list(signature) + "}"_p;
 RULE(FunctionBody, functionBody) = as<Expression>(as<Expression>("->"_p + tupleExpression) | as<Expression>(block));

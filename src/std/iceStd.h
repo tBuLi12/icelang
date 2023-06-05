@@ -88,6 +88,11 @@ def String as Equate<String> {
 
 def<T> [T] {
     public fun length(): int -> this.length
+    public mut pop(): T {
+        let popped = ~this[this.length - 1];
+        this.length = this.length - 1;
+        return popped;
+    }
 }
 
 trait Copy {
@@ -95,11 +100,14 @@ trait Copy {
 }
 
 trait Drop {
-    fun drop()
+    mut drop()
 }
 
 def<T> [T] as Drop {
-    fun drop() {
+    mut drop() {
+        while (this.length != 0) {
+            this.pop();
+        };
         rtFree(this.buffer);
     }
 }

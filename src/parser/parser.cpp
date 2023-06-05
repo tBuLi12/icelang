@@ -162,6 +162,7 @@ template <> constexpr String expected<Annotation> = "an annotation";
 template <> constexpr String expected<Path> = "an identifier";
 template <> constexpr String expected<Visibility> = "a visibility specifier";
 template <> constexpr String expected<FunctionDeclaration> = "fun";
+template <> constexpr String expected<Mutability> = "fun or mut";
 
 template <class L, class... ops>
 constexpr String expected<PrecedenceGroup<L, ops...>> = expected<L>;
@@ -697,6 +698,13 @@ class Parser : public logs::MessageLog {
             return Visibility{spanOf(*keyword), Visibility::Level::Internal};
         }
         return Visibility{Span::null(), Visibility::Level::Private};
+    }
+
+    std::optional<Spanned<bool>> parse(Rule<Mutability>) {
+        if (auto keyword = parse("fun"_kw | "mut"_kw)) {
+            return {{spanOf(*keyword), std::holds_alternative<lexer::Keyword<"mut">>(*keyword)}};
+        }
+        return {};
     }
 
     std::optional<Path> parse(Rule<Path>) {

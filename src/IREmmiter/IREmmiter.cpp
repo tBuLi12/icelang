@@ -459,8 +459,11 @@ struct IRVisitor {
     }
 
     template <String op> Value operator()(ast::Binary<op>&& binary) {
+        fmt::println("b4 binary lhs");
         Value lhs = binary.lhs ? (*this)(*binary.lhs) : chainValue;
+        fmt::println("binary lhs done");
         Value rhs = (*this)(*binary.rhs);
+        fmt::println("binary rhs done");
         if (isNever(lhs) || isNever(rhs))
             return never;
         return (*this)(std::move(binary), lhs, rhs);
@@ -515,6 +518,12 @@ struct IRVisitor {
         appendAndSetInsertTo(inBounds);
 
         return {builder->CreateSDiv(lhs, rhs), {}, &type::integer};
+    }
+
+    Value operator()(ast::Prefix<"~">&& bsOperator) {
+        auto value = (*this)(*bsOperator.rhs);
+        value.owner = std::monostate{};
+        return value;
     }
 
     Value operator()(ast::Binary<"-">&& addition, Value lhs, Value rhs) {
@@ -608,8 +617,7 @@ struct IRVisitor {
     ) {
         std::cout << "IN HERE" << std::endl;
         auto ptr = getVarPointer(std::move(*access.lhs), indices);
-        while (access.namedDepth) {
-            --access.namedDepth;
+        for (size_t i = 0; i < access.namedDepth; ++i) {
             indices.push_back(getInt(32, 0));
         }
         indices.push_back(getInt(32, access.propertyIdx));
@@ -629,8 +637,7 @@ struct IRVisitor {
         ast::TupleFieldAccess&& access, std::vector<llvm::Value*>& indices
     ) {
         auto ptr = getVarPointer(*access.lhs, indices);
-        while (access.namedDepth) {
-            --access.namedDepth;
+        for (size_t i = 0; i < access.namedDepth; ++i) {
             indices.push_back(getInt(32, 0));
         }
         indices.push_back(getInt(32, access.propertyIdx));
@@ -671,6 +678,9 @@ struct IRVisitor {
     }
 
     Value operator()(ast::Binary<"=">&& assignment) {
+        ast::Prefix<"~">* bsOp = std::get_if<ast::Prefix<"~">>(&assignment.lhs->value);
+        ast::Expression& val = bsOp ? *bsOp->rhs : *assignment.lhs;
+
         auto uncopied = (*this)(*assignment.rhs);
         if (isNever(uncopied))
             return never;
@@ -679,13 +689,22 @@ struct IRVisitor {
         std::cout << "Processing assignment" << std::endl;
 
         indices.push_back(getInt(32, 0));
-        auto varPtr = getVarPointer(std::move(*assignment.lhs), indices);
+        auto varPtr = getVarPointer(std::move(val), indices);
 
         auto type = asLLVM(value.type);
         auto target = indices.size() > 1 ? gep(varPtr, indices) : varPtr;
-        drop({builder->CreateLoad(type, target), {}, value.type});
+        if (!bsOp) {
+            drop({builder->CreateLoad(type, target), {}, value.type});
+        }
         builder->CreateStore(value, target);
         return Value{value, varPtr.owner, assignment.type};
+    }
+
+    Value getResolvedVarPointer(ast::Expression& expr, Type const& t) {
+        std::vector<llvm::Value*> indices{};
+        auto varPtr = getVarPointer(std::move(expr), indices);
+        auto target = indices.size() > 1 ? gep(varPtr, indices) : varPtr;
+        return {target, varPtr.owner, t};
     }
 
     Value operator()(ast::If&& ifExpr) {
@@ -779,6 +798,7 @@ struct IRVisitor {
                     match{
                         [&](ast::Expression& expression) {
                             Value condval = (*this)(std::move(expression));
+                            fmt::println("condval done");
                             if (isNever(condval))
                                 return true;
 
@@ -830,7 +850,7 @@ struct IRVisitor {
     }
 
     Value operator()(ast::TypeExpression&& typeExpression) {
-        auto type = asLLVM(typeExpression.theType);
+        auto type = asLLVM(typeExpression.type);
         fmt::println("b4 int");
 
         fmt::println("b4 get");
@@ -858,7 +878,7 @@ struct IRVisitor {
 
     Value operator()(ast::Variable&& variable) {
         if (variable.binding <
-            builder->GetInsertBlock()->getParent()->arg_size()) {
+            builder->GetInsertBlock()->getParent()->arg_size() && !(currentFunction->isMutation && variable.binding == 0)) {
             for (auto& arg : builder->GetInsertBlock()->getParent()->args()) {
                 printllvm(arg.getName());
             }
@@ -997,7 +1017,7 @@ struct IRVisitor {
     ) {
         std::vector<llvm::Type*> llvmParamTypes{};
         if (thisType) {
-            llvmParamTypes.push_back(asLLVM(*thisType));
+            llvmParamTypes.push_back(function.declaration->isMutation ? llvm::PointerType::get(*context, 0) : asLLVM(*thisType));
         }
         for (auto& arg : function.declaration->parameters) {
             llvmParamTypes.push_back(
@@ -1127,6 +1147,7 @@ struct IRVisitor {
         auto ret = std::visit(
             match{
                 [&](Function const& function) -> Value {
+                    fmt::println("EMIT call0-0");
                     auto maybeArgs = getArgs(call);
                     if (!maybeArgs) return never;
                     auto args = std::move(*maybeArgs);
@@ -1173,6 +1194,9 @@ struct IRVisitor {
                     ast::PropertyAccess& access =
                         std::get<ast::PropertyAccess>(call.lhs->value);
                     auto lhs = access.lhs ? (*this)(*access.lhs) : chainValue;
+                    if (method.trait.declaration->signatures[access.propertyIdx].isMutation) {
+                        lhs = getResolvedVarPointer(*access.lhs, lhs.type);
+                    }
 
                     auto maybeArgs = getArgs(call);
                     if (!maybeArgs) return never;
@@ -1205,8 +1229,11 @@ struct IRVisitor {
                     fmt::println("EMIT call00");
                     ast::PropertyAccess& access =
                         std::get<ast::PropertyAccess>(call.lhs->value);
+                       
                     auto lhs = (*this)(*access.lhs);
-                    
+                    if (method.declaration->functions[access.propertyIdx].isMutation) {
+                        lhs = getResolvedVarPointer(*access.lhs, lhs.type);
+                    }
                     auto maybeArgs = getArgs(call);
                     if (!maybeArgs) return never;
                     auto args = std::move(*maybeArgs);
@@ -1236,15 +1263,18 @@ struct IRVisitor {
 
     Value operator()(ast::PropertyAccess&& access) {
         auto target = (*this)(*access.lhs);
+        fmt::println("got access lhs");
+        fmt::println("got access lhs {}", target.type);
+
         if (isNever(target)) {
             return never;
         }
         std::vector<unsigned int> indices{};
-        while (access.namedDepth) {
-            --access.namedDepth;
+        for (size_t i = 0; i < access.namedDepth; ++i) {
             indices.push_back(0);
         }
         indices.push_back(static_cast<unsigned int>(access.propertyIdx));
+        fmt::println("access indices {}", fmt::join(indices, ", "));
         auto val = builder->CreateExtractValue(target, indices);
         return {val, target.owner, access.type};
     }
@@ -1255,8 +1285,7 @@ struct IRVisitor {
             return never;
         }
         std::vector<unsigned int> indices{};
-        while (access.namedDepth) {
-            --access.namedDepth;
+        for (size_t i = 0; i < access.namedDepth; ++i) {
             indices.push_back(0);
         }
         indices.push_back(static_cast<unsigned int>(access.propertyIdx));
@@ -1914,8 +1943,10 @@ struct IRVisitor {
         if (auto dropImpl =
                 implScope.tryFind(type, Trait{dropDeclaration, {}})) {
             std::vector<Value> args;
+            auto alloca = createEntryBlockAlloca(asLLVM(type));
+            builder->CreateStore(builder->CreateExtractValue(value, indices), alloca);
             callTraitMethod(
-                {builder->CreateExtractValue(value, indices), 0, type}, 0, {},
+                {alloca, 0, type}, 0, {},
                 dropImpl.value(), args
             );
             return;
@@ -1933,6 +1964,9 @@ struct IRVisitor {
         if (auto dropImpl =
                 implScope.tryFind(value.type, Trait{dropDeclaration, {}})) {
             std::vector<Value> args;
+            auto alloca = createEntryBlockAlloca(asLLVM(value.type));
+            builder->CreateStore(value, alloca);
+            value.asLLVM = alloca;
             callTraitMethod(
                 {value, 0, value.type}, 0, {}, dropImpl.value(), args
             );
