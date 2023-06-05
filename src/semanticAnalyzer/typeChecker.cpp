@@ -847,20 +847,20 @@ struct ImplementationScope {
     // }
 };
 
-constexpr std::array<std::pair<std::string_view, std::string_view>, 12>
+constexpr std::array<std::pair<std::string_view, std::string_view>, 3>
     operatorTraitNames{{
         {"+", "std::Add"},
         {"*", "std::Multiply"},
         {"==", "std::Equate"},
-        {"!=", "std::Equate"},
-        {"&&", "std::And"},
-        {"||", "std::Or"},
-        {">=", "std::Compare"},
-        {"<=", "std::Compare"},
-        {"<", "std::Compare"},
-        {">", "std::Compare"},
-        {"/", "std::Divide"},
-        {"-", "std::Substract"},
+        // {"!=", "std::Equate"},
+        // {"&&", "std::And"},
+        // {"||", "std::Or"},
+        // {">=", "std::Compare"},
+        // {"<=", "std::Compare"},
+        // {"<", "std::Compare"},
+        // {">", "std::Compare"},
+        // {"/", "std::Divide"},
+        // {"-", "std::Substract"},
     }};
 
 struct VariableScope : std::vector<std::pair<size_t, std::unordered_map<std::string, size_t>>> {
@@ -1643,12 +1643,11 @@ struct TypeChecker {
             return {std::move(binary), type::Never{}};
         }
 
-        static constexpr std::string_view traitName =
+        static constexpr auto traitName =
             std::ranges::find(
                 operatorTraitNames, std::string_view{op.characters},
                 &std::pair<std::string_view, std::string_view>::first
-            )
-                ->second;
+            );
 
         if (std::holds_alternative<type::BuiltIn*>(lhsType) &&
             std::holds_alternative<type::BuiltIn*>(rhsType)) {
@@ -1674,9 +1673,14 @@ struct TypeChecker {
             return {std::move(binary), type};
         }
 
+        if (traitName == operatorTraitNames.end()) {
+            logError(binary.span, "error", "operator {} only accepts built in types as operands", op.characters);
+            return {std::move(binary), type::Never{}};
+        }
+
         if (!implementationScope.areSatisfied(
                 {{Type{lhsType},
-                  Trait{traitScope[std::string{traitName}], {Type{rhsType}}}}}
+                  Trait{traitScope[std::string{traitName->second}], {Type{rhsType}}}}}
             )) {
             logError(
                 binary.span, "invalid operands",
@@ -1689,12 +1693,12 @@ struct TypeChecker {
         std::vector<ast::Expression> args{};
         args.push_back(std::move(*binary.rhs));
         auto ref = TraitMethodRef{
-            Trait{traitScope[std::string{traitName}], {Type{rhsType}}}};
+            Trait{traitScope[std::string{traitName->second}], {Type{rhsType}}}};
         std::cout << binary.lhs.get() << std::endl;
         // struct PropertyAccess {
         //     Span span;
         //     UPtr<Expression> lhs;
-        //     std::optional<TraitName> traitName;
+        //     std::optional<TraitName> traitName->second;
         //     lexer::Identifier property;
 
         //     size_t propertyIdx;
@@ -1711,7 +1715,7 @@ struct TypeChecker {
 
         fmt::println("lets check call");
         auto resolvedReturnType = checkCall(
-            traitScope[std::string{traitName}]->signatures[0], call,
+            traitScope[std::string{traitName->second}]->signatures[0], call,
             {rhsType, lhsType}, {}
         );
         fmt::println("done with check call");
@@ -2090,7 +2094,7 @@ struct TypeChecker {
 
     Type operator()(ast::Prefix<"-">& op) {
         auto type = (*this)(*op.rhs);
-        if (type != &type::boolean) {
+        if (type != &type::integer || type != &type::floating) {
             logError(
                 op.span, "invalid operand",
                 "operator - only accepts int or float operands, found {}", type

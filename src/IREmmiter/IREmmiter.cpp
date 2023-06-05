@@ -537,6 +537,18 @@ struct IRVisitor {
         return value;
     }
 
+    Value operator()(ast::Prefix<"-">&& negation) {
+        auto value = (*this)(*negation.rhs);
+        if (value.type == &type::integer) {
+            return {builder->CreateSub(getInt(32, 0), value), {}, &type::integer};
+        }    
+        return {builder->CreateFNeg(value), {}, &type::floating};
+    }
+
+    Value operator()(ast::Prefix<"!">&& negation) {
+        return {builder->CreateSub(getInt(1, 1), (*this)(*negation.rhs)), {}, &type::boolean};
+    }
+
     Value operator()(ast::Binary<"-">&& addition, Value lhs, Value rhs) {
         if (lhs.type == &type::floating) {
             return {builder->CreateFSub(lhs, rhs), {}, &type::floating};
