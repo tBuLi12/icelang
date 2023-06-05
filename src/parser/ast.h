@@ -562,11 +562,10 @@ struct Module {
     }
 };
 
-
 template <> struct fmt::formatter<Trait> : formatter<std::string> {
     auto format(Trait const& trait, auto& ctx) const {
         if (trait.typeArguments.size() > 0) {
-            return fmt::format_to(ctx.out(), "{}{}", trait.declaration->name, fmt::join(trait.typeArguments, ","));
+            return fmt::format_to(ctx.out(), "{}<{}>", trait.declaration->name, fmt::join(trait.typeArguments, ","));
         }
         return fmt::format_to(ctx.out(), "{}", trait.declaration->name);
     }

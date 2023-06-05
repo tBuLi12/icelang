@@ -102,6 +102,8 @@ struct IRVisitor {
     std::vector<ast::Binding> cleanupStack{};
 
     std::vector<Module*>* modules;
+     struct Lifetime;
+    Lifetime* topLevelLifetime;
 
 
 
@@ -130,6 +132,7 @@ struct IRVisitor {
         Lifetime(IRVisitor& _self)
             : ir(_self), cleanupSize(ir.cleanupStack.size()),
               temporarySize(ir.temporaryCleanup.size()) {
+            if (!ir.topLevelLifetime) ir.topLevelLifetime = this;
             std::cout << "LIFETIME START" << std::endl;
         }
 
@@ -148,14 +151,6 @@ struct IRVisitor {
         }
 
         void end() {
-            fmt::println(
-                "MANUAL END {} {}", ir.temporaryCleanup.size(), temporarySize
-            );
-            for (auto& t : ir.temporaryCleanup) {
-                fmt::println(
-                    "with t {} {}", t.type, reinterpret_cast<void*>(t.asLLVM)
-                );
-            }
             size_t i = ir.temporaryCleanup.size();
             while (i > temporarySize) {
                 auto value = ir.temporaryCleanup[--i];
@@ -177,26 +172,15 @@ struct IRVisitor {
             }
         }
 
-        ~Lifetime() {
-            while (ir.temporaryCleanup.size() > temporarySize) {
-                auto value = std::move(ir.temporaryCleanup.back());
-                ir.temporaryCleanup.pop_back();
-                value.owner = std::monostate{};
-                if (value.asLLVM) {
-                    ir.drop(value);
-                }
-            }
+        void forget() {
+            ir.temporaryCleanup.resize(temporarySize);
+            ir.cleanupStack.resize(cleanupSize);
+            if (ir.topLevelLifetime == this) ir.topLevelLifetime = nullptr;
+        }
 
-            while (ir.cleanupStack.size() > cleanupSize) {
-                auto drop = std::move(ir.cleanupStack.back());
-                ir.cleanupStack.pop_back();
-                if (drop.value) {
-                    auto value = ir.builder->CreateLoad(
-                        ir.asLLVM(drop.type), drop.value
-                    );
-                    ir.drop({value, {}, drop.type});
-                }
-            }
+        ~Lifetime() {
+            end();
+            forget();
         }
     };
 
@@ -245,6 +229,7 @@ struct IRVisitor {
                 BindPattern{
                     *this, noMatch, &lifetime}(matchCase.pattern, scrutinee);
                 result = std::visit(*this, std::move(matchCase.value.value));
+                if (isNever(result)) lifetime.forget();
                 if (match.sameTypeResult) {
                     result = copy(result);
                 }
@@ -286,6 +271,7 @@ struct IRVisitor {
 
     Value operator()(ast::Return&& _return) {
         Value value = _return.value ? (*this)(*_return.value) : null();
+        topLevelLifetime->end();
         builder->CreateRet(value);
         return never;
     }
@@ -393,18 +379,16 @@ struct IRVisitor {
         size_t nOfElems = elements ? elements->elements.size() : 0;
         llvm::Type* elemType = asLLVM(vector.elementType);
 
-            fmt::println("wilee 0");
         std::vector<Value> values{};
         for (size_t i = 0; i < nOfElems; ++i) {
-            fmt::println("wilee n{}", i);
-            values.push_back((*this)(std::move(elements->elements[i])));
+            auto value = (*this)(std::move(elements->elements[i]));
+            if (isNever(value)) return never;
+            values.push_back(suspend(value));
         }
-            fmt::println("wilee 1");
 
         llvm::Value* elementSize = getInt(
             32, currentModule->getDataLayout().getTypeAllocSize(elemType)
         );
-            fmt::println("wilee 2");
         std::vector<llvm::Value*> lengths{getInt(32, 0)};
         for (size_t i = 0; i < nOfElems; ++i) {
             fmt::println("wilee 5");
@@ -429,7 +413,7 @@ struct IRVisitor {
         for (size_t i = 0; i < nOfElems; ++i) {
             if (auto spread =
                     std::get_if<ast::Spread>(&elements->elements[i].value)) {
-                Value owned = copy(values[i]);
+                Value owned = copy(release(values[i]));
                 auto offset = builder->CreateMul(lengths[i], elementSize);
                 auto movedSize =
                     builder->CreateMul(extract(values[i], {0, 2}), elementSize);
@@ -442,7 +426,7 @@ struct IRVisitor {
                 
                 llvm::Value* element =
                     builder->CreateInBoundsGEP(elemType, ptr, {lengths[i]});
-                builder->CreateStore(copy(values[i]), element);
+                builder->CreateStore(release(copy(values[i])), element);
             }
             fmt::println("will aaa {}", nOfElems);
         }
@@ -904,6 +888,7 @@ struct IRVisitor {
                                                 : block.items.end();
         for (auto item = block.items.begin(); item != last; ++item) {
             if (isNever((*this)(*item))) {
+                lifetime.forget();
                 return never;
             }
         }
@@ -915,6 +900,7 @@ struct IRVisitor {
                 value = copy(value);
             }
             std::cout << "no" << std::endl;
+            
             return value;
         }
         return null();
@@ -941,27 +927,30 @@ struct IRVisitor {
     }
 
     Value operator()(ast::TupleLiteral&& tuple) {
-        std::vector<llvm::Value*> fieldValues{};
+        std::vector<Value> fieldValues{};
         for (auto& field : tuple.fields) {
             auto value = (*this)(field);
-            fieldValues.push_back(copy(value));
+            if (isNever(value)) return never;
+            fmt::println("NextField");
+            fieldValues.push_back(suspend(value));
         }
 
         llvm::Value* literal = llvm::UndefValue::get(asLLVM(tuple.type));
         for (unsigned int i = 0; i < tuple.fields.size(); ++i) {
-            literal = builder->CreateInsertValue(literal, fieldValues[i], {i});
+            literal = builder->CreateInsertValue(literal, copy(release(fieldValues[i])), {i});
         }
 
         return {literal, {}, tuple.type};
     }
 
     Value operator()(ast::StructLiteral&& structure) {
-        std::vector<llvm::Value*> fieldValues{};
+        std::vector<Value> fieldValues{};
         std::vector<std::pair<std::string*, llvm::Type*>> fieldTypesWithNames{};
         for (auto& [_, name, expression] : structure.properties) {
             auto value = (*this)(std::move(expression.value()));
+            if (isNever(value)) return never;
             fieldTypesWithNames.push_back({&name, value->getType()});
-            fieldValues.push_back(copy(value));
+            fieldValues.push_back(suspend(value));
         }
         std::ranges::sort(
             fieldTypesWithNames, {},
@@ -986,7 +975,7 @@ struct IRVisitor {
                 )
             ));
             literal =
-                builder->CreateInsertValue(literal, fieldValues[i], {fieldIdx});
+                builder->CreateInsertValue(literal, copy(release(fieldValues[i])), {fieldIdx});
         }
 
         if (!structure.namedType) {
@@ -1213,6 +1202,7 @@ struct IRVisitor {
                     return {result, {}, call.type};
                 },
                 [&](ImplRef const& method) -> Value {
+                    fmt::println("EMIT call00");
                     ast::PropertyAccess& access =
                         std::get<ast::PropertyAccess>(call.lhs->value);
                     auto lhs = (*this)(*access.lhs);
@@ -1220,17 +1210,20 @@ struct IRVisitor {
                     auto maybeArgs = getArgs(call);
                     if (!maybeArgs) return never;
                     auto args = std::move(*maybeArgs);
+                    fmt::println("EMIT call11");
 
                     std::vector<Value> args2{args};
                     auto result = callMethod(
-                        lhs, access.propertyIdx, method.typeArguments, method,
+                        lhs, access.propertyIdx, method.funTypeArguments, method,
                         args2
                     );
+                    fmt::println("EMIT call22");
 
                     for (size_t i = 0; i < args.size(); ++i) {
                         if (args[i].owner.index() == 0)
                             drop(args[i]);
                     }
+                    fmt::println("EMIT call33");
 
                     return {result, {}, call.type};
                 },
@@ -1620,10 +1613,10 @@ struct IRVisitor {
             builder->CreateRet(copy(ret));
         }
         cleanupStack.clear();
-        // if (llvm::verifyFunction(*function->asLLVM, &llvm::outs())) {
-        //     std::cout << "error found" << std::endl;
-        //     throw "error found";
-        // }
+        if (llvm::verifyFunction(*function->asLLVM, &llvm::outs())) {
+            std::cout << "error found" << std::endl;
+            throw "error found";
+        }
     }
 
     void operator()(TypeMonomorph* type) {}
@@ -1673,10 +1666,10 @@ struct IRVisitor {
         if (!isNever(result)) {
             builder->CreateRet(result);
         }
-        // if (llvm::verifyFunction(*llvmFunc, &llvm::outs())) {
-        //     std::cout << "error found" << std::endl;
-        //     throw "error found";
-        // }
+        if (llvm::verifyFunction(*llvmFunc, &llvm::outs())) {
+            std::cout << "error found" << std::endl;
+            throw "error found";
+        }
         while (signatureStack.size() > 0) {
             auto func = signatureStack.back();
             signatureStack.pop_back();

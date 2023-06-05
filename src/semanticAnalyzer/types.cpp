@@ -34,11 +34,6 @@ std::ostream& operator<<(std::ostream& stream, Type const& type) {
                     stream << fmt::format(
                         "<{}>", fmt::join(first.typeArguments, ",")
                     );
-                } else {
-                    if (first.declaration->name.value == "Vector") {
-                        fmt::println("wtf");
-                        throw "";
-                    }
                 }
             },
             [&](type::BuiltIn* const& first) { stream << first->name; },
@@ -57,7 +52,7 @@ std::ostream& operator<<(std::ostream& stream, Type const& type) {
                 stream << ")";
             },
             [&](type::Parameter const& first) {
-                stream << "param " << first.isBlockParameter << " "
+                stream << "T" << first.isBlockParameter
                        << first.index;
             },
             [&](type::Never const& first) { stream << "never"; },

@@ -121,6 +121,7 @@ struct TraitBoundScope {
     bool includes(Trait const& checkedTrait, Type const& checkedType) const {
         if (local) {
             for (auto& [type, trait] : *local) {
+                fmt::println("SEARCHING LOCAL BOUNDS {} {} {} {}", checkedTrait ,trait ,checkedType ,type);
                 if (checkedTrait == trait && checkedType == type) {
                     return true;
                 }
@@ -205,6 +206,30 @@ bool tryMatch(
         },
         first, second
     );
+}
+
+bool containsType(Type const& first, Type const& second) {
+    return first == second || std::visit(
+        match{
+            [](auto const&) {
+                return false;
+            },
+            [&](type::Named const& named) {
+                return ranges::any_of(named.typeArguments, [&](Type const& inner){return containsType(inner, second);});
+            },
+            [&](type::Struct const& structure) {
+                return ranges::any_of(structure.properties, [&](Type const& inner){return containsType(inner, second);}, &std::pair<std::string, Type>::second);
+            },
+            [&](type::Tuple const& tuple) {
+                return ranges::any_of(tuple.fields, [&](Type const& inner){return containsType(inner, second);});
+            },
+        },
+        first
+    );
+}
+
+bool containsType(Trait const& first, Type const& second) {
+    return ranges::any_of(first.typeArguments, [&](Type const& inner){return containsType(inner, second);});
 }
 
 struct Intersect {
@@ -1129,10 +1154,10 @@ struct TypeChecker {
             );
             return {};
         }
-        std::vector<Type> typeParams;
+        std::vector<Type> typeArgs;
         for (auto& typeName : traitName.typeArgumentNames) {
             if (auto type = resolve(typeName)) {
-                typeParams.push_back(std::move(*type));
+                typeArgs.push_back(std::move(*type));
             } else {
                 return {};
             }
@@ -1143,10 +1168,18 @@ struct TypeChecker {
             );
             return {};
         };
+        if (declaration->second->typeParameterNames.size() != typeArgs.size()) {
+            logError(
+                traitName.span,
+                "invalid number of type arguments",
+                "expected {} type arguments, found {}",
+                declaration->second->typeParameterNames.size(), typeArgs.size()
+            );
+        }
 
         return Trait{
             declaration->second,
-            std::move(typeParams),
+            std::move(typeArgs),
         };
     }
 
@@ -1221,6 +1254,14 @@ struct TypeChecker {
             );
             return {};
         };
+        if (type->second->typeParameterNames.size() != typeArgs.size()) {
+            logError(
+                named.span,
+                "invalid number of type arguments",
+                "expected {} type arguments, found {}",
+                type->second->typeParameterNames.size(), typeArgs.size()
+            );
+        }
         return Type{type->second, std::move(typeArgs)};
     }
 
@@ -1286,6 +1327,16 @@ struct TypeChecker {
         auto type = resolve(traitImplementation.typeName);
 
         if (trait && type) {
+            for (size_t i = 0; i < traitImplementation.typeParameterNames.size(); ++i) {
+                Type param{type::Parameter{true, i}};
+                if (!containsType(*type, param) && !containsType(*trait, param)) {
+                    logError(traitImplementation.typeParameterNames[i].span, "error", "unbound type parameter {}", traitImplementation.typeParameterNames[i].name.value);
+                    blockTypeParameters.clear();
+                    selfType.reset();
+                    return;
+                }
+            }
+
             traitImplementation.trait = *trait;
             traitImplementation.type = *type;
             implementationScope.root.children.push_back(
@@ -1309,6 +1360,7 @@ struct TypeChecker {
             traitImplementation.implementations, {},
             [](auto const& decl) { return decl.name.value; }
         );
+        implementationScope.currentBounds.block = &traitImplementation.traitBounds;
 
         scope.enter();
         scope.add("this", *selfType, false);
@@ -1395,6 +1447,20 @@ struct TypeChecker {
             }
         }
 
+        for (ast::Signature& signature : traitImplementation.implementations) {
+            auto expected = ranges::find(
+                traitImplementation.trait.declaration->signatures, signature.name.value,
+                [](auto const& fun) { return fun.name.value; }
+            );
+            if (expected == traitImplementation.trait.declaration->signatures.end()) {
+                logError(
+                    signature.span, "invalid function",
+                    "trait {} does not declare a function named {}", traitImplementation.traitName, signature.name
+                );
+            }
+        }
+
+
         selfType.reset();
         blockTypeParameters.clear();
     }
@@ -1450,7 +1516,7 @@ struct TypeChecker {
             for (auto& traitName : bounds) {
                 if (auto trait = resolve(traitName)) {
                     function.traitBounds.push_back(
-                        {Type{type::Parameter{true, i}}, std::move(*trait)}
+                        {Type{type::Parameter{false, i}}, std::move(*trait)}
                     );
                 }
             }
@@ -2706,7 +2772,8 @@ struct TypeChecker {
             );
         }
 
-        if (call.typeArgumentNames.size() !=
+        std::cout << "checking...2" << std::endl;
+        if (typeArguments.size() !=
             function.typeParameterNames.size()) {
             logError(
                 function.span, "invalid number of type parameters",
@@ -2715,9 +2782,11 @@ struct TypeChecker {
                 call.typeArgumentNames.size()
             );
         }
+        std::cout << "checking..3" << std::endl;
 
         auto withres =
             with(blockTypeArguments, typeArguments, function.traitBounds);
+        std::cout << "checking..4" << std::endl;
 
         for (size_t i :
              implementationScope.areSatisfiedAll(std::move(withres))) {
@@ -2727,6 +2796,7 @@ struct TypeChecker {
                 withres[i].second
             );
         }
+        std::cout << "checking..5 " << blockTypeArguments.size() << typeArguments.size() << std::endl;
 
         return Type{
             with(blockTypeArguments, typeArguments, function.returnType)};
@@ -2746,7 +2816,7 @@ struct TypeChecker {
         }
         void presetFun(std::vector<Type> const& args) {
             for (size_t i = 0; i < args.size(); ++i) {
-                blockTypeArgs[i] = args[i];
+                funTypeArgs[i] = args[i];
             }
         }
 
@@ -2800,7 +2870,7 @@ struct TypeChecker {
                         (*funTypeParamNames)[i].name
                     );
                 }
-                funTypeArgs.push_back(arg || type::Never{});
+                funTArgs.push_back(arg || type::Never{});
             }
             return {blockTArgs, funTArgs};
         }
@@ -2869,6 +2939,13 @@ struct TypeChecker {
                             );
                             return type::Never{};
                         }
+                        if (!isVisible(namedType->second, namedType->second->protoVisibility)) {
+                            logError(
+                                variable.span, "error",
+                                "prototype of type {} is not accessible", variable.name
+                            );
+                            return type::Never{};
+                        }
                         if (namedType->second->typeParameterNames.size() !=
                             typeArguments.size()) {
                             logError(
@@ -2894,9 +2971,9 @@ struct TypeChecker {
                                 );
                                 return constructedType;
                             }
-                            auto proto = with(
-                                typeArguments, {}, namedType->second->proto
-                            );
+                            std::cout << "get the proto " << std::endl;
+                            auto proto = protoOf(constructedType);
+                            std::cout << "get the proto2 " << std::endl;
                             if (!argTypes[0].isAssignableTo(proto)) {
                                 logError(
                                     call.span, "invalid initialization",
@@ -2906,11 +2983,9 @@ struct TypeChecker {
                                     Type{type::Named{constructedType}}
                                 );
                             }
-                            auto constructedType = type::Named{
-                                namedType->second,
-                                std::move(typeArguments),
-                            };
+                            std::cout << "get the prot3 " << std::endl;
                             call.target = type::Named{constructedType};
+                            std::cout << "get the proto4 " << std::endl;
                             return std::move(Type{std::move(constructedType)});
                         }
                         if (tuple->fields.size() != call.argValues.size()) {
@@ -2957,20 +3032,26 @@ struct TypeChecker {
                     inferer.funTypeArgs.resize(
                         func->second->typeParameterNames.size()
                     );
+                        std::cout << "will match1" << std::endl;
                     inferer.presetFun(typeArguments);
-                    for (size_t i = 0; i < call.argValues.size(); ++i) {
+                        std::cout << "will match2" << std::endl;
+                    for (auto&& [param, arg] : views::zip(func->second->parameters, argTypes)) {
+                        std::cout << "will match" << std::endl;
                         inferer.match(
-                            func->second->parameters[i].type, argTypes[i]
+                            param.type, arg
                         );
                     }
 
                     auto [_, tArgs] = inferer.get();
+                    std::cout << "checking..15" << std::endl;
                     auto resolvedReturnType =
                         checkCall(*func->second, call, {}, tArgs);
+                    std::cout << "checking..0" << std::endl;
                     call.target = Function{
                         func->second,
-                        std::move(typeArguments),
+                        std::move(tArgs),
                     };
+                    std::cout << "checking..7" << std::endl;
                     return std::move(resolvedReturnType);
                 },
                 [&](ast::PropertyAccess& method) -> Type {
@@ -2986,51 +3067,70 @@ struct TypeChecker {
                     std::cout << "got lhs " << std::endl;
 
                     // regular method
-                    for (auto impl : implScope) {
-                        Inferer inferer{
-                            *this, {}, {}, &impl->typeParameterNames, nullptr};
-                        inferer.blockTypeArgs.resize(
-                            impl->typeParameterNames.size()
-                        );
-                        std::cout << "gonna " << impl->type << std::endl;
-                        if (inferer.match(impl->type, lhsType)) {
-                            auto func = std::ranges::find_if(
-                                impl->functions,
-                                [&](ast::Signature& sig) {
-                                    return sig.name.value ==
-                                           method.property.value;
-                                }
-                            );
-                            if (func != impl->functions.end()) {
-                                if (!isVisible(func)) {
-                                    logError(
-                                        call.span, "error",
-                                        "method {} is not accessible",
-                                        func->name
-                                    );
-                                    return type::Never{};
-                                }
-                                inferer.funTypeParamNames =
-                                    &func->typeParameterNames;
-                                inferer.funTypeArgs.resize(
-                                    func->typeParameterNames.size()
-                                );
-                                inferer.checkArgs(
-                                    *func, typeArguments, argTypes
-                                );
-
-                                auto [blockTArgs, tArgs] = inferer.get();
-                                auto resolvedReturnType =
-                                    checkCall(*func, call, blockTArgs, tArgs);
-                                method.propertyIdx = std::distance(
-                                    impl->functions.begin(), func
-                                );
-                                call.target = ImplRef{
-                                    impl,
-                                    blockTArgs,
-                                };
-                                return resolvedReturnType;
+                    if (!method.traitName) {
+                        for (auto impl : implScope) {
+                            if (auto named = std::get_if<type::Named>(&impl->type)) {
+                                if (!named->declaration) continue;
                             }
+
+                            Inferer inferer{
+                                *this, {}, {}, &impl->typeParameterNames, nullptr};
+                            inferer.blockTypeArgs.resize(
+                                impl->typeParameterNames.size()
+                            );
+                            std::cout << "gonna " << impl->type << std::endl;
+                            if (inferer.match(impl->type, lhsType)) {
+                                auto func = std::ranges::find_if(
+                                    impl->functions,
+                                    [&](ast::Signature& sig) {
+                                        return sig.name.value ==
+                                            method.property.value;
+                                    }
+                                );
+                                if (func != impl->functions.end()) {
+                                    if (!isVisible(func)) {
+                                        logError(
+                                            call.span, "error",
+                                            "method {} is not accessible",
+                                            func->name
+                                        );
+                                        return type::Never{};
+                                    }
+                                    inferer.funTypeParamNames =
+                                        &func->typeParameterNames;
+                                    inferer.funTypeArgs.resize(
+                                        func->typeParameterNames.size()
+                                    );
+                                    inferer.checkArgs(
+                                        *func, typeArguments, argTypes
+                                    );
+
+                                    auto [blockTArgs, tArgs] = inferer.get();
+                                    auto resolvedReturnType =
+                                        checkCall(*func, call, blockTArgs, tArgs);
+                                    method.propertyIdx = std::distance(
+                                        impl->functions.begin(), func
+                                    );
+                                    call.target = ImplRef{
+                                        impl,
+                                        blockTArgs,
+                                        tArgs,
+                                    };
+                                    return resolvedReturnType;
+                                }
+                            }
+                        }
+                    }
+                    
+                    ast::TraitDeclaration* traitDecl = nullptr;
+                    std::optional<Trait> resolved{};
+                    
+                    if (method.traitName) {
+                        if (auto trait = resolve(*method.traitName)) {
+                            resolved = *trait;
+                            traitDecl = resolved->declaration;
+                        } else {
+                            return type::Never{};
                         }
                     }
 
@@ -3038,24 +3138,43 @@ struct TypeChecker {
                     // maybe it's a trait method
                     std::vector<std::pair<ast::TraitDeclaration*, size_t>>
                         candidates;
-                    for (auto [_, trait] : traitScope) {
+
+                    if (!resolved) {
+                        for (auto [_, trait] : traitScope) {
+                            auto traitMethod = std::ranges::find_if(
+                                trait->signatures,
+                                [&](ast::Signature& sig) {
+                                    return sig.name.value == method.property.value;
+                                }
+                            );
+                            if (traitMethod != trait->signatures.end()) {
+                                candidates.push_back(
+                                    {trait,
+                                    std::distance(
+                                        trait->signatures.begin(), traitMethod
+                                    )}
+                                );
+                            }
+                        }
+                    } else {
                         auto traitMethod = std::ranges::find_if(
-                            trait->signatures,
+                            resolved->declaration->signatures,
                             [&](ast::Signature& sig) {
                                 return sig.name.value == method.property.value;
                             }
                         );
-                        if (traitMethod != trait->signatures.end()) {
+                        if (traitMethod != resolved->declaration->signatures.end()) {
                             candidates.push_back(
-                                {trait,
-                                 std::distance(
-                                     trait->signatures.begin(), traitMethod
-                                 )}
+                                {resolved->declaration,
+                                std::distance(
+                                    resolved->declaration->signatures.begin(), traitMethod
+                                )}
                             );
                         }
                     }
+                    
                     std::cout << "so trait methdod? " << candidates.size()
-                              << std::endl;
+                            << std::endl;
                     if (candidates.size() == 0) {
                         logError(
                             method.property.span, "undefined method",
@@ -3072,7 +3191,8 @@ struct TypeChecker {
                         );
                         return type::Never{};
                     }
-                    auto traitDecl = candidates[0].first;
+                    traitDecl = candidates[0].first;
+                    
                     if (!isVisible(traitDecl)) {
                         logError(
                             method.property.span, "error",
@@ -3093,6 +3213,9 @@ struct TypeChecker {
                     inferer.funTypeArgs.resize(
                         traitDecl->signatures[idx].typeParameterNames.size()
                     );
+                    inferer.presetFun(typeArguments);
+                    if (resolved)
+                        inferer.presetFun(resolved->typeArguments);
                     inferer.checkArgs(
                         traitDecl->signatures[idx], typeArguments, argTypes
                     );
@@ -3163,13 +3286,32 @@ struct TypeChecker {
 
     void saveSignatures(ast::Implementation& impl) {
         size_t i = 0;
-        for (auto& [_, parameter, __] : impl.typeParameterNames) {
-            blockTypeParameters[parameter.value] = i++;
+        for (auto& [_, parameter, bounds] :
+             impl.typeParameterNames) {
+            blockTypeParameters[parameter.value] = i;
+            for (auto& traitName : bounds) {
+                if (auto trait = resolve(traitName)) {
+                    impl.traitBounds.push_back(
+                        {Type{type::Parameter{true, i}}, std::move(*trait)}
+                    );
+                }
+            }
+            ++i;
         }
 
         auto targetType = resolve(impl.typeName);
         if (!targetType)
             return;
+
+        for (size_t i = 0; i < impl.typeParameterNames.size(); ++i) {
+            Type param{type::Parameter{true, i}};
+            if (!containsType(*targetType, param)) {
+                logError(impl.typeParameterNames[i].span, "error", "unbound type parameter {}", impl.typeParameterNames[i].name.value);
+                blockTypeParameters.clear();
+                return;
+            }
+        }
+
         impl.type = *targetType;
         std::cout << "got impl type " << impl.type << std::endl;
         selfType = Type{impl.type};
@@ -3195,6 +3337,7 @@ struct TypeChecker {
         for (auto& [_, parameter, __] : impl.typeParameterNames) {
             blockTypeParameters[parameter.value] = i++;
         }
+        implementationScope.currentBounds.block = &impl.traitBounds;
 
         scope.enter();
         scope.add("this", *selfType, false);

@@ -48,7 +48,7 @@ static constexpr auto setBlueColor = "\u001b[36;1m";
 static constexpr auto resetColor = "\u001b[0m";
 
 DLLEXPORT void rtOobError(const char* message, int32_t index, int32_t length) {
-    std::cout << setRedColor << "index out of bound" << resetColor << ": accessing index " << index
+    std::cout << setRedColor << "index out of bounds" << resetColor << ": accessing index " << index
               << " on a vector of length " << length << std::endl
               << message;
     exit(1);

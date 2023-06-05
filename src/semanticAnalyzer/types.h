@@ -47,6 +47,7 @@ struct TraitImplRef {
 struct ImplRef {
     ast::Implementation* declaration;
     std::vector<Type> typeArguments;
+    std::vector<Type> funTypeArguments;
 };
 
 namespace type {
