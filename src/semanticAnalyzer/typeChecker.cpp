@@ -2094,13 +2094,14 @@ struct TypeChecker {
 
     Type operator()(ast::Prefix<"-">& op) {
         auto type = (*this)(*op.rhs);
-        if (type != &type::integer || type != &type::floating) {
+        if (type != &type::integer && type != &type::floating) {
             logError(
                 op.span, "invalid operand",
                 "operator - only accepts int or float operands, found {}", type
             );
+            return type::Never{};
         }
-        return type::Never{};
+        return type;
     }
 
     Type operator()(ast::Prefix<"~">& op) {
@@ -2800,6 +2801,8 @@ struct TypeChecker {
         mergeBranchTypes(result, trueType);
         if (ifExpr.falseBranch) {
             mergeBranchTypes(result, (*this)(**ifExpr.falseBranch));
+        } else {
+            mergeBranchTypes(result, &type::null);
         }
         ifExpr.hasSameTypeBranch = ifExpr.falseBranch && result.has_value();
         --controlFlowDepth;
@@ -3536,6 +3539,5 @@ struct TypeChecker {
         for (auto& error : implementationScope.removeDuplicates()) {
             log.diagnostics.push_back(std::move(error));
         }
-        implementationScope.debugTree();
     }
 };

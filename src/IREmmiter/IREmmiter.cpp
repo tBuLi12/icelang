@@ -97,9 +97,15 @@ struct IRVisitor {
     ast::TraitDeclaration* dropDeclaration;
     llvm::Function* rtOobError;
     llvm::Function* rtZeroDivError;
+    llvm::Function* rtSubUnderflowError;
+    llvm::Function* rtAddOverflowError;
+    llvm::Function* rtMulOverflowError;
+    llvm::Function* rtStackOverflowError;
+    llvm::GlobalVariable* stackSize;
 
     std::vector<Value> temporaryCleanup{};
     std::vector<ast::Binding> cleanupStack{};
+    std::vector<size_t> moves{};
 
     std::vector<Module*>* modules;
      struct Lifetime;
@@ -163,11 +169,15 @@ struct IRVisitor {
             size_t j = ir.cleanupStack.size();
             while (j > cleanupSize) {
                 auto drop = ir.cleanupStack[--j];
-                if (drop.value) {
+                auto found = ranges::find(ir.moves, j);
+                if (found == ir.moves.end()) {
+                    fmt::println("now dropping {} with {}", j, fmt::join(ir.moves, ","));
                     auto value = ir.builder->CreateLoad(
                         ir.asLLVM(drop.type), drop.value
                     );
                     ir.drop({value, {}, drop.type});
+                } else {
+                    ir.moves.erase(found);
                 }
             }
         }
@@ -194,7 +204,7 @@ struct IRVisitor {
     LoopContext* loopCtx;
 
     bool isNever(Value value) {
-        return !value.asLLVM;
+        return value.type == Type{type::Never{}};
     }
 
     static constexpr Value never = Value{nullptr, {}, type::Never{}};
@@ -272,6 +282,9 @@ struct IRVisitor {
     Value operator()(ast::Return&& _return) {
         Value value = _return.value ? copy(take(*_return.value)) : null();
         topLevelLifetime->end();
+        auto currentStackSize = builder->CreateLoad(type::integer.asLLVM, stackSize);
+        auto newStackSize = builder->CreateSub(currentStackSize, getInt(32, 1));
+        builder->CreateStore(newStackSize, stackSize);
         builder->CreateRet(value);
         return never;
     }
@@ -318,13 +331,9 @@ struct IRVisitor {
     llvm::Value* indexVector(Value vector, Value index, Span accessSpan) {
         llvm::Value* vecLen = builder->CreateExtractValue(vector, {0, 2});
 
-        fmt::println("into422 index access");
         auto indexTooLarge = builder->CreateICmpSGE(index, vecLen);
-        fmt::println("into433 index access");
         auto indexTooSmall = builder->CreateICmpSLT(index, getInt(32, 0));
-        fmt::println("into444 index access");
         auto isOutOfBounds = builder->CreateOr({indexTooLarge, indexTooSmall});
-        fmt::println("into455 index access");
         auto outOfBounds = createBlock("outofbounds");
         auto inBounds = createBlock("inbounds");
         builder->CreateCondBr(isOutOfBounds, outOfBounds, inBounds);
@@ -465,7 +474,7 @@ struct IRVisitor {
     Value operator()(ast::Expression& expression) {
         fmt::println("visiting it {}", expression.value.index());
         auto val = std::visit(std::move(*this), std::move(expression.value));
-        fmt::println("after visit");
+        fmt::println("after visit {}", val.type);
         return val;
     }
 
@@ -553,7 +562,28 @@ struct IRVisitor {
         if (lhs.type == &type::floating) {
             return {builder->CreateFSub(lhs, rhs), {}, &type::floating};
         }
-        return {builder->CreateSub(lhs, rhs), {}, &type::integer};
+
+        auto intType = lhs.asLLVM->getType();
+        auto subWithOverflow = llvm::Intrinsic::getDeclaration(currentModule.get(), llvm::Intrinsic::ssub_with_overflow, intType);
+        auto result = builder->CreateCall(subWithOverflow, {lhs, rhs});
+        auto hasOverflown = builder->CreateExtractValue(result, {1});
+        auto overflow = createBlock("overflow");
+        auto noOverflow = createBlock("nooverflow");
+        builder->CreateCondBr(hasOverflown, overflow, noOverflow);
+        appendAndSetInsertTo(overflow);
+        
+        std::stringstream error{};
+        logs::SpannedMessage msg{currentFunction->location->source, addition.span, "", ""};
+        msg.printBodyTo(error);
+        auto errorMessage =
+            builder->CreateGlobalStringPtr(error.str(), "subUnderflowError");
+        builder->CreateCall(rtSubUnderflowError, {errorMessage, lhs, rhs});
+
+        builder->CreateBr(noOverflow);
+        appendAndSetInsertTo(noOverflow);
+        auto difference = builder->CreateExtractValue(result, {0});
+
+        return {difference, {}, &type::integer};
     }
 
     Value operator()(ast::Binary<"&&">&& logicAnd) {
@@ -594,7 +624,26 @@ struct IRVisitor {
         if (lhs.type == &type::floating) {
             return Value{builder->CreateFAdd(lhs, rhs), {}, &type::floating};
         }
-        return Value{builder->CreateAdd(lhs, rhs), {}, &type::integer};
+        auto intType = lhs.asLLVM->getType();
+        auto sumWithOverflow = llvm::Intrinsic::getDeclaration(currentModule.get(), llvm::Intrinsic::sadd_with_overflow, intType);
+        auto result = builder->CreateCall(sumWithOverflow, {lhs, rhs});
+        auto hasOverflown = builder->CreateExtractValue(result, {1});
+        auto overflow = createBlock("overflow");
+        auto noOverflow = createBlock("nooverflow");
+        builder->CreateCondBr(hasOverflown, overflow, noOverflow);
+        appendAndSetInsertTo(overflow);
+        
+        std::stringstream error{};
+        logs::SpannedMessage msg{currentFunction->location->source, addition.span, "", ""};
+        msg.printBodyTo(error);
+        auto errorMessage =
+            builder->CreateGlobalStringPtr(error.str(), "addOverflowError");
+        builder->CreateCall(rtAddOverflowError, {errorMessage, lhs, rhs});
+
+        builder->CreateBr(noOverflow);
+        appendAndSetInsertTo(noOverflow);
+        auto sum = builder->CreateExtractValue(result, {0});
+        return Value{sum, {}, &type::integer};
     }
 
     Value operator()(ast::Binary<"==">&& equate, Value lhs, Value rhs) {
@@ -618,7 +667,28 @@ struct IRVisitor {
         if (lhs.type == &type::floating) {
             return Value{builder->CreateFMul(lhs, rhs), {}, &type::floating};
         }
-        return Value{builder->CreateMul(lhs, rhs), {}, &type::integer};
+
+        auto intType = lhs.asLLVM->getType();
+        auto mulWithOverflow = llvm::Intrinsic::getDeclaration(currentModule.get(), llvm::Intrinsic::smul_with_overflow, intType);
+        auto result = builder->CreateCall(mulWithOverflow, {lhs, rhs});
+        auto hasOverflown = builder->CreateExtractValue(result, {1});
+        auto overflow = createBlock("overflow");
+        auto noOverflow = createBlock("nooverflow");
+        builder->CreateCondBr(hasOverflown, overflow, noOverflow);
+        appendAndSetInsertTo(overflow);
+        
+        std::stringstream error{};
+        logs::SpannedMessage msg{currentFunction->location->source, multiplication.span, "", ""};
+        msg.printBodyTo(error);
+        auto errorMessage =
+            builder->CreateGlobalStringPtr(error.str(), "mulOverflowError");
+        builder->CreateCall(rtMulOverflowError, {errorMessage, lhs, rhs});
+
+        builder->CreateBr(noOverflow);
+        appendAndSetInsertTo(noOverflow);
+        auto product = builder->CreateExtractValue(result, {0});
+
+        return Value{product, {}, &type::integer};
     }
 
     Value operator()(ast::Condition&& condition) {
@@ -746,7 +816,9 @@ struct IRVisitor {
 
         appendAndSetInsertTo(ifBlock);
 
+        size_t movesize = moves.size();
         auto trueVal = (*this)(*ifExpr.trueBranch);
+        moves.resize(movesize);
         if (!ifExpr.hasSameTypeBranch) {
             if (trueVal.owner.index() == 0)
                 drop(trueVal);
@@ -763,7 +835,9 @@ struct IRVisitor {
             fmt::println("into if 3");
 
             appendAndSetInsertTo(elseBlock);
+            size_t movesize = moves.size();
             falseVal = (*this)(**ifExpr.falseBranch);
+            moves.resize(movesize);
 
             if (ifExpr.hasSameTypeBranch) {
                 falseVal = copy(falseVal);
@@ -794,7 +868,7 @@ struct IRVisitor {
             }
         }
 
-        fmt::println("after if");
+        fmt::println("after if {}", currentFunction->name.value);
 
         return null();
     }
@@ -859,7 +933,9 @@ struct IRVisitor {
             }
 
             appendAndSetInsertTo(loopBlock);
+            size_t movesize = moves.size();
             auto bodyValue = (*this)(*loop.body);
+            moves.resize(movesize);
             if (bodyValue.owner.index() == 0)
                 drop(bodyValue);
             loopBlock = builder->GetInsertBlock();
@@ -907,7 +983,7 @@ struct IRVisitor {
             }
             std::cout << builder->GetInsertBlock()->getParent()->arg_size()
                       << " generating value from param " << variable.binding
-                      << " " << variable.name << std::endl;
+                      << " " << variable.name << " of type " << cleanupStack[variable.binding].type << std::endl;
             return {
                 cleanupStack[variable.binding].value, variable.binding,
                 cleanupStack[variable.binding].type};
@@ -1167,10 +1243,10 @@ struct IRVisitor {
 
     std::optional<std::vector<Value>> getArgs(ast::Call& call) {
         std::vector<Value> args{};
-        for (auto& arg : call.argValues) {
+        for (auto&& [i, arg] : call.argValues | views::enumerate) {
             Value argValue = (*this)(arg);
             if (isNever(argValue)) {
-                fmt::println("never arg! {}", arg);
+                fmt::println("never arg {} {}! {}", i, argValue.type, arg);
                 return {};
             }
             args.push_back(argValue);
@@ -1676,12 +1752,32 @@ struct IRVisitor {
         std::cout << "got both " << function->definition->name.value
                   << std::endl;
 
+        auto currentStackSize = builder->CreateLoad(type::integer.asLLVM, stackSize);
+        auto stackOverflow = createBlock("stackoverflow");
+        auto noStackOverflow = createBlock("nostackoverflow");
+        auto stackWillOverflow = builder->CreateICmpSGE(currentStackSize, getInt(32, 1000));
+        builder->CreateCondBr(stackWillOverflow, stackOverflow, noStackOverflow);
+        appendAndSetInsertTo(stackOverflow);
+        std::stringstream error{};
+        logs::SpannedMessage msg{currentFunction->location->source, static_cast<ast::Signature&>(*currentFunction).span, "", ""};
+        msg.printBodyTo(error);
+        auto errorMessage =
+            builder->CreateGlobalStringPtr(error.str(), "stackoverflowError");
+        builder->CreateCall(rtStackOverflowError, {errorMessage});
+        builder->CreateBr(noStackOverflow);
+        appendAndSetInsertTo(noStackOverflow);
+        auto newStackSize = builder->CreateAdd(currentStackSize, getInt(32, 1));
+        builder->CreateStore(newStackSize, stackSize);
+
         auto ret = (*this)(function->definition->body);
         if (!isNever(ret)) {
             ret.type = with(
                 *blockTypeArguments, *typeArguments,
                 function->definition->returnType
             );
+            auto currentStackSize = builder->CreateLoad(type::integer.asLLVM, stackSize);
+            auto newStackSize = builder->CreateSub(currentStackSize, getInt(32, 1));
+            builder->CreateStore(newStackSize, stackSize);
             builder->CreateRet(copy(ret));
         }
         cleanupStack.clear();
@@ -1694,6 +1790,10 @@ struct IRVisitor {
     void operator()(TypeMonomorph* type) {}
 
     void emitMain(ast::FunctionDeclaration* mainFunction) {
+        auto global = currentModule->getOrInsertGlobal("stacksize", type::integer.asLLVM);
+        stackSize = currentModule->getNamedGlobal("stacksize");
+        stackSize->setInitializer(llvm::ConstantInt::get(*context, llvm::APInt(32, 0)));
+        stackSize->setLinkage(llvm::GlobalValue::PrivateLinkage);
         currentFunction = mainFunction;
         functions["rtAlloc"] = createSignature(allocFunc, "rtAlloc");
         functions["rtMove"] = createSignature(moveFunc, "rtMove");
@@ -1701,6 +1801,16 @@ struct IRVisitor {
         functions["rtFree"] = createSignature(freeFunc, "rtFree");
         std::cout << "sigs done" << std::endl;
 
+        rtStackOverflowError = llvm::Function::Create(
+            llvm::FunctionType::get(
+                llvm::Type::getVoidTy(*context),
+                {
+                    llvm::PointerType::get(*context, 0),
+                },
+                false
+            ),
+            llvm::Function::ExternalLinkage, "rtStackOverflowError", currentModule.get()
+        );
         rtOobError = llvm::Function::Create(
             llvm::FunctionType::get(
                 llvm::Type::getVoidTy(*context),
@@ -1712,6 +1822,42 @@ struct IRVisitor {
                 false
             ),
             llvm::Function::ExternalLinkage, "rtOobError", currentModule.get()
+        );
+                rtSubUnderflowError = llvm::Function::Create(
+            llvm::FunctionType::get(
+                llvm::Type::getVoidTy(*context),
+                {
+                    llvm::PointerType::get(*context, 0),
+                    llvm::Type::getInt32Ty(*context),
+                    llvm::Type::getInt32Ty(*context),
+                },
+                false
+            ),
+            llvm::Function::ExternalLinkage, "rtSubUnderflowError", currentModule.get()
+        );
+                rtAddOverflowError = llvm::Function::Create(
+            llvm::FunctionType::get(
+                llvm::Type::getVoidTy(*context),
+                {
+                    llvm::PointerType::get(*context, 0),
+                    llvm::Type::getInt32Ty(*context),
+                    llvm::Type::getInt32Ty(*context),
+                },
+                false
+            ),
+            llvm::Function::ExternalLinkage, "rtAddOverflowError", currentModule.get()
+        );
+                rtMulOverflowError = llvm::Function::Create(
+            llvm::FunctionType::get(
+                llvm::Type::getVoidTy(*context),
+                {
+                    llvm::PointerType::get(*context, 0),
+                    llvm::Type::getInt32Ty(*context),
+                    llvm::Type::getInt32Ty(*context),
+                },
+                false
+            ),
+            llvm::Function::ExternalLinkage, "rtMulOverflowError", currentModule.get()
         );
         rtZeroDivError = llvm::Function::Create(
             llvm::FunctionType::get(
@@ -2041,8 +2187,7 @@ struct IRVisitor {
                 [this](ast::Variable& var) {
                     auto value = (*this)(std::move(var));
                     if (value.owner.index() == 1 && var.mayMove) {
-                        cleanupStack[std::get<size_t>(value.owner)].value =
-                            nullptr;
+                        moves.push_back(std::get<size_t>(value.owner));
                         value.owner = std::monostate{};
                     }
                     return value;

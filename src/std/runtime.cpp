@@ -61,6 +61,35 @@ DLLEXPORT void rtZeroDivError(const char* message) {
     exit(1);
 }
 
+DLLEXPORT void rtSubUnderflowError(const char* message, int32_t lhs, int32_t rhs) {
+    std::cerr << setRedColor << "arithmetic error" << resetColor << ": substracting " << rhs << " from " << lhs << " caused underflow"
+              << std::endl
+              << message;
+    exit(1);
+}
+
+DLLEXPORT void rtAddOverflowError(const char* message, int32_t lhs, int32_t rhs) {
+    std::cerr << setRedColor << "arithmetic error" << resetColor << ": adding " << lhs << " to " << rhs << " caused overflow"
+              << std::endl
+              << message;
+    exit(1);
+}
+
+DLLEXPORT void rtMulOverflowError(const char* message, int32_t lhs, int32_t rhs) {
+    std::cerr << setRedColor << "arithmetic error" << resetColor << ": multiplying " << lhs << " and " << rhs << " caused " << (((rhs > 0) != (lhs > 0)) ? "undeflow" : "overflow")
+              << std::endl
+              << message;
+    exit(1);
+}
+
+DLLEXPORT void rtStackOverflowError(const char* message) {
+    std::cerr << setRedColor << "stack overflow" << resetColor << ": stack depth reached 1000 calls upon entering this function"
+              << std::endl
+              << message;
+    exit(1);
+}
+
+
 DLLEXPORT int32_t dbgPrint() {
     std::cout << "eee" << std::endl;
     return 0;
