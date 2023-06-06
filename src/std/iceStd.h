@@ -57,7 +57,7 @@ fun push<T>(vector: Vector<T>, item: T): Vector<T> {
     vec
 }
 
-public type String [char]
+public type String public [char]
 
 def String {
     public fun print() {
@@ -88,6 +88,7 @@ def String as Equate<String> {
 
 def<T> [T] {
     public fun length(): int -> this.length
+    public fun rawBuffer(): @ptr int -> this.buffer
     public mut pop(): T {
         let popped = ~this[this.length - 1];
         this.length = this.length - 1;

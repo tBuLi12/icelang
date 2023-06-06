@@ -8,9 +8,6 @@ Result jit(std::string_view sourceCode) {
     std::stringstream stdLib{stdIce};
     Source stdsource{stdLib, "std"};
     auto [program, log] = parseProgram(stdsource);
-    if (!log.errorsAreEmpty()) {
-        log.printDiagnosticsTo(std::cerr);
-    }
     auto mod = new Module{
             stdsource, std::move(program), "std"}; 
 
