@@ -1,8 +1,6 @@
 #ifndef ICY_LEXER_H
 #define ICY_LEXER_H
 
-#define _ITERATOR_DEBUG_LEVEL 0
-
 #include "../logs/logs.h"
 #include "../string/string.h"
 #include <array>

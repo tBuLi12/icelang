@@ -1,4 +1,7 @@
 #include "../semanticAnalyzer/typeChecker.cpp"
+#include "ast.h"
+#include "range/v3/view/enumerate.hpp"
+#include "types.h"
 
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
@@ -23,6 +26,10 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/TargetParser/Host.h"
+#include <iterator>
+#include <string>
+#include <variant>
+#include <vcruntime.h>
 
 struct FunctionMonomorph {
     llvm::Function* asLLVM;
@@ -69,6 +76,8 @@ struct Value {
         return asLLVM;
     }
 };
+
+
 
 struct IRVisitor {
     std::unique_ptr<llvm::LLVMContext> context;
@@ -139,7 +148,6 @@ struct IRVisitor {
             : ir(_self), cleanupSize(ir.cleanupStack.size()),
               temporarySize(ir.temporaryCleanup.size()) {
             if (!ir.topLevelLifetime) ir.topLevelLifetime = this;
-            std::cout << "LIFETIME START" << std::endl;
         }
 
         bool includes(Value value) {
@@ -171,7 +179,6 @@ struct IRVisitor {
                 auto drop = ir.cleanupStack[--j];
                 auto found = ranges::find(ir.moves, j);
                 if (found == ir.moves.end()) {
-                    fmt::println("now dropping {} with {}", j, fmt::join(ir.moves, ","));
                     auto value = ir.builder->CreateLoad(
                         ir.asLLVM(drop.type), drop.value
                     );
@@ -234,7 +241,6 @@ struct IRVisitor {
 
             Value result;
             {
-                std::cout << "match" << std::endl;
                 auto lifetime = beginLifetime();
                 BindPattern{
                     *this, noMatch, &lifetime}(matchCase.pattern, scrutinee);
@@ -302,29 +308,21 @@ struct IRVisitor {
 
     Value operator()(lexer::CharLiteral&& character) {
         auto val= Value{getInt(8, character.value), {}, builtInTypes["char"]};
-            fmt::println("char time");
             return val;
     }
 
     Value operator()(lexer::StringLiteral&& string) {
         auto ptr = builder->CreateGlobalStringPtr(string.value, "strLiteral");
         auto size = getInt(32, string.value.size());
-        fmt::println("str done");
         llvm::Value* bufPtr =
             builder->CreateCall(functions["rtAlloc"]->asLLVM, {size});
-        fmt::println("str done");
 
         builder->CreateCall(functions["rtMove"]->asLLVM, {getInt(32, 0), bufPtr, ptr, size});
         llvm::Value* charVector = getEmptyVector(builtInTypes["char"], size, bufPtr);
-        fmt::println("str done");
         Type stringt{type::Named{stringDeclaration, {}}};
-        fmt::println("str done1 {}", stringt);
         auto s = asLLVM(stringt);
-        fmt::println("str done1x ");
         auto undef = llvm::UndefValue::get(s);
-        fmt::println("str done2");
         auto strIs = insert({undef, {}, stringt}, 0, charVector);
-        fmt::println("str done");
         return strIs;
     }
 
@@ -338,42 +336,29 @@ struct IRVisitor {
         auto inBounds = createBlock("inbounds");
         builder->CreateCondBr(isOutOfBounds, outOfBounds, inBounds);
         appendAndSetInsertTo(outOfBounds);
-        fmt::println("into466 index access");
         std::stringstream error{};
         logs::SpannedMessage msg{currentFunction->location->source, accessSpan, "", ""};
         msg.printBodyTo(error);
         auto errorMessage =
             builder->CreateGlobalStringPtr(error.str(), "oobError");
-        fmt::println("into477 index access");
         builder->CreateCall(rtOobError, {errorMessage, index, vecLen});
         builder->CreateBr(inBounds);
         appendAndSetInsertTo(inBounds);
-        fmt::println("into488 index access");
 
         llvm::Value* bufPtr = builder->CreateExtractValue(vector, {0, 0});
-        fmt::println("into499 index access");
-        fmt::println("into499 index access {}", with(*blockTypeArguments, *typeArguments, vector.type));
-        fmt::println("into400 index access");
         auto elemType =
             asLLVM(std::get<type::Named>(with(*blockTypeArguments, *typeArguments, vector.type)).typeArguments[0]);
-        std::cout << "uuu" << std::endl;
         return builder->CreateInBoundsGEP(elemType, bufPtr, {index});
     }
 
     Value operator()(ast::IndexAccess&& access) {
-        fmt::println("into index access");
         auto lhs = (*this)(*access.lhs);
-        fmt::println("into5 index access");
-        std::cout << lhs.type << std::endl;
         auto index = (*this)(*access.index);
-        fmt::println("into4 index access");
         if (isNever(lhs) || isNever(index))
             return never;
 
         llvm::Type* elementType = asLLVM(access.elementType);
-        fmt::println("into45 index access");
         auto elementPtr = indexVector(lhs, index, access.span);
-        fmt::println("into3 index access");
         llvm::Value* value = builder->CreateLoad(elementType, elementPtr);
 
         if (lhs.owner.index() == 0) {
@@ -411,7 +396,6 @@ struct IRVisitor {
         );
         std::vector<llvm::Value*> lengths{getInt(32, 0)};
         for (size_t i = 0; i < nOfElems; ++i) {
-            fmt::println("wilee 5");
             if (auto spread =
                     std::get_if<ast::Spread>(&elements->elements[i].value)) {
                 lengths.push_back(builder->CreateAdd(
@@ -423,7 +407,6 @@ struct IRVisitor {
                 );
             }
         }
-            fmt::println("wilee 28");
 
         auto byteCap = builder->CreateMul(lengths.back(), elementSize);
 
@@ -448,14 +431,10 @@ struct IRVisitor {
                     builder->CreateInBoundsGEP(elemType, ptr, {lengths[i]});
                 builder->CreateStore(copy(release(values[i])), element);
             }
-            fmt::println("will aaa {}", nOfElems);
         }
 
         llvm::Value* literal = getEmptyVector(vector.elementType, lengths.back(), ptr);
-        fmt::println("will print type");
-        std::cout << vector.type << std::endl;
         auto val = Value{literal, {}, vector.type};
-        fmt::println("in literal {}", val.owner.index());
         return val;
     }
 
@@ -472,18 +451,13 @@ struct IRVisitor {
     }
 
     Value operator()(ast::Expression& expression) {
-        fmt::println("visiting it {}", expression.value.index());
         auto val = std::visit(std::move(*this), std::move(expression.value));
-        fmt::println("after visit {}", val.type);
         return val;
     }
 
     template <String op> Value operator()(ast::Binary<op>&& binary) {
-        fmt::println("b4 binary lhs");
         Value lhs = binary.lhs ? (*this)(*binary.lhs) : chainValue;
-        fmt::println("binary lhs done");
         Value rhs = (*this)(*binary.rhs);
-        fmt::println("binary rhs done");
         if (isNever(lhs) || isNever(rhs))
             return never;
         return (*this)(std::move(binary), lhs, rhs);
@@ -587,14 +561,12 @@ struct IRVisitor {
     }
 
     Value operator()(ast::Binary<"&&">&& logicAnd) {
-        fmt::println("LOGIC AND lhs");
         Value lhs = (*this)(*logicAnd.lhs);
         auto currentBlock = builder->GetInsertBlock();
         auto shortCircuit = createBlock("short");
         auto evalRhs = createBlock("rhs");
         builder->CreateCondBr(lhs, evalRhs, shortCircuit);
         appendAndSetInsertTo(evalRhs);
-        fmt::println("LOGIC AND rhs");
         Value rhs = (*this)(*logicAnd.rhs);
         builder->CreateBr(shortCircuit);
         appendAndSetInsertTo(shortCircuit);
@@ -692,10 +664,8 @@ struct IRVisitor {
     }
 
     Value operator()(ast::Condition&& condition) {
-        fmt::println("cond gen");
 
         auto& expr = std::get<ast::Expression>(condition.value);
-        fmt::println("gotexpr");
 
         return (*this)(std::move(expr));
     }
@@ -708,7 +678,6 @@ struct IRVisitor {
     Value getVarPointer(
         ast::PropertyAccess&& access, std::vector<llvm::Value*>& indices
     ) {
-        std::cout << "IN HERE" << std::endl;
         auto ptr = getVarPointer(std::move(*access.lhs), indices);
         for (size_t i = 0; i < access.namedDepth; ++i) {
             indices.push_back(getInt(32, 0));
@@ -739,11 +708,6 @@ struct IRVisitor {
 
     Value
     getVarPointer(ast::Variable&& var, std::vector<llvm::Value*>& indices) {
-        // if (!cleanupStack[var.binding].isMutable) {
-        //     std::cout << "assignment to immutable" << std::endl;
-        //     throw "";
-        // }
-
         return {
             cleanupStack[var.binding].value, var.binding,
             cleanupStack[var.binding].type};
@@ -752,10 +716,6 @@ struct IRVisitor {
     Value getVarPointer(
         ast::Expression&& expression, std::vector<llvm::Value*>& indices
     ) {
-        std::cout << "calling getVarPointer on ";
-        fmt::println("{}", expression);
-        std::cout << std::endl;
-
         return std::visit(
             [&](auto& expression) {
                 return getVarPointer(std::move(expression), indices);
@@ -779,18 +739,47 @@ struct IRVisitor {
             return never;
         auto value = copy(uncopied);
         std::vector<llvm::Value*> indices{};
-        std::cout << "Processing assignment" << std::endl;
 
         indices.push_back(getInt(32, 0));
         auto varPtr = getVarPointer(std::move(val), indices);
 
         auto type = asLLVM(value.type);
         auto target = indices.size() > 1 ? gep(varPtr, indices) : varPtr;
+        
         if (!bsOp) {
             drop({builder->CreateLoad(type, target), {}, value.type});
         }
+
         builder->CreateStore(value, target);
+
         return Value{value, varPtr.owner, assignment.type};
+    }
+
+    Value operator()(ast::Binary<"+=">&& assignment) {
+        ast::Expression& val = *assignment.lhs;
+        auto uncopied = (*this)(*assignment.rhs);
+        if (isNever(uncopied))
+            return never;
+        auto value = copy(uncopied);
+        std::vector<llvm::Value*> indices{};
+
+        indices.push_back(getInt(32, 0));
+        auto varPtr = getVarPointer(std::move(val), indices);
+
+        auto type = asLLVM(value.type);
+        auto target = indices.size() > 1 ? gep(varPtr, indices) : varPtr;
+        
+        auto rhs = builder->CreateLoad(uncopied->getType(), target);
+        Value sum;
+        if (uncopied.type == &type::floating) {
+            sum = Value{builder->CreateFAdd(value, rhs), {}, &type::floating};
+        } else {
+            sum = Value{builder->CreateAdd(value, rhs), {}, &type::floating};
+        }
+
+        builder->CreateStore(sum, target);
+
+        return Value{sum, {}, assignment.type};
     }
 
     Value getResolvedVarPointer(ast::Expression& expr, Type const& t) {
@@ -801,7 +790,6 @@ struct IRVisitor {
     }
 
     Value operator()(ast::If&& ifExpr) {
-        fmt::println("into if");
         auto conditionValue = (*this)(std::move(*ifExpr.condition));
         if (isNever(conditionValue))
             return never;
@@ -826,17 +814,15 @@ struct IRVisitor {
         if (!isNever(trueVal))
             builder->CreateBr(afterBlock);
         ifBlock = builder->GetInsertBlock();
-        fmt::println("into if 2");
 
         bool resultIsOwned = true;
 
         Value falseVal;
         if (ifExpr.falseBranch) {
-            fmt::println("into if 3");
 
             appendAndSetInsertTo(elseBlock);
             size_t movesize = moves.size();
-            falseVal = (*this)(**ifExpr.falseBranch);
+            falseVal = (*this)(*ifExpr.falseBranch);
             moves.resize(movesize);
 
             if (ifExpr.hasSameTypeBranch) {
@@ -860,7 +846,6 @@ struct IRVisitor {
             } else if (isNever(falseVal)) {
                 return trueVal;
             } else {
-                fmt::println("into if 7");
                 auto phi = builder->CreatePHI(trueVal->getType(), 2);
                 phi->addIncoming(trueVal, ifBlock);
                 phi->addIncoming(falseVal, elseBlock);
@@ -868,14 +853,10 @@ struct IRVisitor {
             }
         }
 
-        fmt::println("after if {}", currentFunction->name.value);
-
         return null();
     }
 
     Value operator()(ast::While&& loop) {
-        fmt::println("into while");
-
         auto function = builder->GetInsertBlock()->getParent();
         auto conditionBlock = createBlock("loopcondition");
         auto loopBlock = createBlock("loopbody");
@@ -895,7 +876,6 @@ struct IRVisitor {
                     match{
                         [&](ast::Expression& expression) {
                             Value condval = (*this)(std::move(expression));
-                            fmt::println("condval done");
                             if (isNever(condval))
                                 return true;
 
@@ -944,27 +924,21 @@ struct IRVisitor {
         builder->CreateBr(conditionBlock);
         appendAndSetInsertTo(afterBlock);
 
-        fmt::println("while done");
         return null();
     }
 
     Value operator()(ast::TypeExpression&& typeExpression) {
         auto type = asLLVM(typeExpression.type);
-        fmt::println("b4 int");
 
-        fmt::println("b4 get");
         llvm::Value* size =
             getInt(32, currentModule->getDataLayout().getTypeAllocSize(type));
-        fmt::println("b4 undef");
         auto literal = llvm::UndefValue::get(llvm::StructType::get(
             *context,
             llvm::ArrayRef{static_cast<llvm::Type*>(
                 llvm::StructType::get(*context, llvm::ArrayRef{size->getType()})
             )}
         ));
-        fmt::println("b4 create");
         auto val = builder->CreateInsertValue(literal, size, {0});
-        fmt::println("got {}", reinterpret_cast<void*>(val));
         return {val, {}, typeExpression.type};
     }
 
@@ -978,20 +952,11 @@ struct IRVisitor {
     Value operator()(ast::Variable&& variable) {
         if (variable.binding <
             builder->GetInsertBlock()->getParent()->arg_size() && !(currentFunction->isMutation && variable.binding == 0)) {
-            for (auto& arg : builder->GetInsertBlock()->getParent()->args()) {
-                printllvm(arg.getName());
-            }
-            std::cout << builder->GetInsertBlock()->getParent()->arg_size()
-                      << " generating value from param " << variable.binding
-                      << " " << variable.name << " of type " << cleanupStack[variable.binding].type << std::endl;
             return {
                 cleanupStack[variable.binding].value, variable.binding,
                 cleanupStack[variable.binding].type};
         }
 
-        std::cout << cleanupStack.size() << " generating value from var "
-                  << variable.binding << " " << variable.name << " "
-                  << cleanupStack[variable.binding].type << std::endl;
         return {
             builder->CreateLoad(
                 asLLVM(cleanupStack[variable.binding].type),
@@ -1001,7 +966,6 @@ struct IRVisitor {
     }
 
     Value operator()(ast::Block&& block) {
-        std::cout << "block" << std::endl;
         auto lifetime = beginLifetime();
         auto last = block.hasTrailingExpression ? --block.items.end()
                                                 : block.items.end();
@@ -1013,12 +977,9 @@ struct IRVisitor {
         }
         if (block.hasTrailingExpression) {
             auto value = (*this)(block.items.back(), false);
-            std::cout << "includes?" << std::endl;
             if (lifetime.includes(value)) {
-                std::cout << "yep" << std::endl;
                 value = copy(value);
             }
-            std::cout << "no" << std::endl;
             
             return value;
         }
@@ -1030,20 +991,14 @@ struct IRVisitor {
                                 : take(std::get<ast::Expression>(item.value));
         ast::Expression* expression = std::get_if<ast::Expression>(&item.value);
         if (expression && dropResult) {
-            std::cout << "done with block item" << std::endl;
             if (value.owner.index() == 0) {
-                fmt::println("DROP IT {}", value.type);
                 drop(value);
-            } else {
-            std::cout << "Nah" << std::endl;
-
             }
         }
         return value;
     }
 
     Value operator()(lexer::IntegerLiteral&& integer) {
-        std::cout << "returning integer" << std::endl;
         return getInt(32, integer.value);
     }
 
@@ -1056,7 +1011,6 @@ struct IRVisitor {
         for (auto& field : tuple.fields) {
             auto value = (*this)(field);
             if (isNever(value)) return never;
-            fmt::println("NextField");
             fieldValues.push_back(suspend(value));
         }
 
@@ -1113,6 +1067,35 @@ struct IRVisitor {
             ),
             {},
             structure.type};
+    }
+
+    Value operator()(ast::VariantLiteral&& variant) {
+        Value fieldValue = variant.value ? (*this)(*variant.value) : null();
+
+        type::Variant type = variant.namedType 
+            ? std::get<type::Variant>(variant.namedType->declaration->proto) 
+            : type::Variant{{{variant.variant.value, fieldValue.type}}};
+
+        llvm::AllocaInst* literal =
+            createEntryBlockAlloca(asLLVM(type));
+        Value variantValue = {literal, fieldValue.owner, type::Variant{type}};
+
+        auto pos = ranges::find(type.variants, variant.variant.value, &std::pair<std::string, Type>::first);
+        builder->CreateStore(getInt(64, std::distance(type.variants.begin(), pos)), gep(variantValue, {getInt(32, 0)}));
+        builder->CreateStore(fieldValue, gep(variantValue, {getInt(32, 1)}));
+
+        Value variantValueLoaded = {builder->CreateLoad(asLLVM(type), variantValue), fieldValue.owner, type::Variant{type}};
+
+        if (!variant.namedType) {
+            return variantValueLoaded;
+        }
+
+        return {
+            builder->CreateInsertValue(
+                llvm::UndefValue::get(asLLVM(variant.type)), variantValueLoaded, {0}
+            ),
+            variantValueLoaded.owner,
+            variant.type};
     }
 
     FunctionMonomorph* createSignature(
@@ -1187,9 +1170,6 @@ struct IRVisitor {
 
         auto& func = functions[name];
         if (!func) {
-            if (target.name.value == "copy") {
-                fmt::println("requesting copy impl for type {}", thisValue.type);
-            }
             func = createSignature(
                 Function{&target, typeArguments}, name, thisValue.type,
                 impl.typeArguments
@@ -1228,16 +1208,10 @@ struct IRVisitor {
 
     llvm::Value* call(FunctionMonomorph* func, std::vector<Value> const& args) {
         std::vector<llvm::Value*> argVals{};
-        fmt::println("EMIT call");
-        std::cout << func << std::endl;
         for (auto& val : args) {
-            std::cout << val.asLLVM << std::endl;
             argVals.push_back(val.asLLVM);
         }
-        fmt::println("EMIT callL");
         auto cl = builder->CreateCall(func->asLLVM, argVals);
-        fmt::println("EMIT callR");
-        std::cout << cl->getType() << std::endl;
         return cl;
     }
 
@@ -1246,7 +1220,6 @@ struct IRVisitor {
         for (auto&& [i, arg] : call.argValues | views::enumerate) {
             Value argValue = (*this)(arg);
             if (isNever(argValue)) {
-                fmt::println("never arg {} {}! {}", i, argValue.type, arg);
                 return {};
             }
             args.push_back(argValue);
@@ -1258,11 +1231,9 @@ struct IRVisitor {
         auto ret = std::visit(
             match{
                 [&](Function const& function) -> Value {
-                    fmt::println("EMIT call0-0");
                     auto maybeArgs = getArgs(call);
                     if (!maybeArgs) return never;
                     auto args = std::move(*maybeArgs);
-                    fmt::println("EMIT call3");
                     auto monomorphName =
                         function.declaration->annotation
                             ? function.declaration->name.value
@@ -1287,9 +1258,7 @@ struct IRVisitor {
                     
                     auto literal = llvm::UndefValue::get(asLLVM(type));
                     if (!std::holds_alternative<type::Tuple>(type.declaration->proto)) {
-                        fmt::println("EMIT call4");
                         auto res = builder->CreateInsertValue(literal, copy(args[0]), {0});
-                        fmt::println("EMIT call5");
                         return {res, {}, call.type};
                     }
                     for (size_t i = 0; i < args.size(); ++i) {
@@ -1326,18 +1295,14 @@ struct IRVisitor {
                         lhs, access.propertyIdx, method.typeArguments, impl,
                         args2
                     );
-                    std::cout << "has called trait " << args.size() << " "
-                               << std::endl;
                     if (lhs.owner.index() == 0) drop(lhs);
                     for (size_t i = 0; i < args.size(); ++i) {
                         if (args[i].owner.index() == 0)
                             drop(args[i]);
                     }
-                    std::cout << "after drop" << std::endl;
                     return {result, {}, call.type};
                 },
                 [&](ImplRef const& method) -> Value {
-                    fmt::println("EMIT call00");
                     ast::PropertyAccess& access =
                         std::get<ast::PropertyAccess>(call.lhs->value);
                        
@@ -1348,20 +1313,17 @@ struct IRVisitor {
                     auto maybeArgs = getArgs(call);
                     if (!maybeArgs) return never;
                     auto args = std::move(*maybeArgs);
-                    fmt::println("EMIT call11");
 
                     std::vector<Value> args2{args};
                     auto result = callMethod(
                         lhs, access.propertyIdx, method.funTypeArguments, method,
                         args2
                     );
-                    fmt::println("EMIT call22");
 
                     for (size_t i = 0; i < args.size(); ++i) {
                         if (args[i].owner.index() == 0)
                             drop(args[i]);
                     }
-                    fmt::println("EMIT call33 {}", access.property.value);
 
                     return {result, {}, call.type};
                 },
@@ -1374,8 +1336,6 @@ struct IRVisitor {
 
     Value operator()(ast::PropertyAccess&& access) {
         auto target = (*this)(*access.lhs);
-        fmt::println("got access lhs");
-        fmt::println("got access lhs {}", target.type);
 
         if (isNever(target)) {
             return never;
@@ -1385,7 +1345,6 @@ struct IRVisitor {
             indices.push_back(0);
         }
         indices.push_back(static_cast<unsigned int>(access.propertyIdx));
-        fmt::println("access indices {}", fmt::join(indices, ", "));
         auto val = builder->CreateExtractValue(target, indices);
         return {val, target.owner, access.type};
     }
@@ -1466,6 +1425,64 @@ struct IRVisitor {
         };
     }
 
+    Value operator()(ast::Cast&& cast) {
+        auto value = (*this)(*cast.lhs);
+        if (auto lhsUnion = std::get_if<type::Union>(&cast.type)) {
+            Value unionValue = {createEntryBlockAlloca(asLLVM(*lhsUnion)), value.owner, Type{type::Union{*lhsUnion}}};
+            if (auto rhsUnion = std::get_if<type::Union>(&value.type)) {
+                auto discriminant = gep(unionValue, {getInt(32, 0)});
+                auto body = gep(unionValue, {getInt(32, 1)});
+                auto sourceDiscriminant = extract(value, 0);
+                auto sourceBody = extract(value, 1);
+                auto afterSwitch = createBlock("afterswitch");
+                llvm::SwitchInst* _switch = builder->CreateSwitch(sourceDiscriminant, afterSwitch);
+                for (auto&& [i, element] : rhsUnion->elements | views::enumerate) {
+                    auto block = createBlock("elem");
+                    _switch->addCase(llvm::ConstantInt::get(*context, llvm::APInt(64, i)), block);
+                    appendAndSetInsertTo(block);
+                    auto typePosition = ranges::find(lhsUnion->elements, element);
+                    builder->CreateStore(getInt(64, std::distance(lhsUnion->elements.begin(), typePosition)), discriminant);
+                    builder->CreateBr(afterSwitch);
+                }
+                appendAndSetInsertTo(afterSwitch);
+                builder->CreateStore(sourceBody, body);
+            } else {
+                auto discriminant = gep(unionValue, {getInt(32, 0)});
+                auto body = gep(unionValue, {getInt(32, 1)});
+                auto typePosition = ranges::find(lhsUnion->elements, value.type);
+                builder->CreateStore(getInt(64, std::distance(lhsUnion->elements.begin(), typePosition)), discriminant);
+                builder->CreateStore(value, body);
+            }
+            unionValue.asLLVM = builder->CreateLoad(asLLVM(*lhsUnion), unionValue.asLLVM);
+            return unionValue;
+        }
+
+        if (auto lhsVariant = std::get_if<type::Variant>(&cast.type)) {
+            Value variantValue = {createEntryBlockAlloca(asLLVM(*lhsVariant)), value.owner, Type{type::Variant{*lhsVariant}}};
+            type::Variant& rhsVariant = std::get<type::Variant>(value.type);
+            auto discriminant = gep(variantValue, {getInt(32, 0)});
+            auto body = gep(variantValue, {getInt(32, 1)});
+            auto sourceDiscriminant = extract(value, 0);
+            auto sourceBody = extract(value, 1);
+            auto afterSwitch = createBlock("afterswitch");
+            llvm::SwitchInst* _switch = builder->CreateSwitch(sourceDiscriminant, afterSwitch);
+            for (auto&& [i, element] : rhsVariant.variants | views::enumerate) {
+                auto block = createBlock("variant");
+                _switch->addCase(llvm::ConstantInt::get(*context, llvm::APInt(64, i)), block);
+                appendAndSetInsertTo(block);
+                auto typePosition = ranges::find(lhsVariant->variants, element.first, &std::pair<std::string, Type>::first);
+                builder->CreateStore(getInt(64, std::distance(lhsVariant->variants.begin(), typePosition)), discriminant);
+                builder->CreateBr(afterSwitch);
+            }
+            appendAndSetInsertTo(afterSwitch);
+            builder->CreateStore(sourceBody, body);
+            variantValue.asLLVM = builder->CreateLoad(asLLVM(*lhsVariant), variantValue.asLLVM);
+            return variantValue;
+        }
+
+        return value;
+    }
+
     struct BindPattern {
         IRVisitor& ir;
         llvm::BasicBlock* noMatch;
@@ -1490,7 +1507,6 @@ struct IRVisitor {
         }
 
         void assignBinding(Value value) {
-            std::cout << ":bind var/let" << std::endl;
             ir.cleanupStack.push_back({});
             auto& binding = ir.cleanupStack.back();
             llvm::Value* val = ir.copy(value);
@@ -1528,11 +1544,13 @@ struct IRVisitor {
         void operator()(
             ast::PropertyPattern& property, std::vector<Value>& propertyValues
         ) {
-            for (size_t index : property.propertyIndices) {
-                assignBinding(ir.release(propertyValues[index]));
+            if (!property.pattern) {
+                for (size_t index : property.propertyIndices) {
+                    assignBinding(ir.release(propertyValues[index]));
+                }
             }
             if (property.pattern) {
-                (*this)(*property.pattern, ir.load(ir.cleanupStack.size() - 1));
+                (*this)(*property.pattern, ir.release(propertyValues[0]));
             } else if (!std::holds_alternative<ast::Variable>(
                            property.property.value
                        )) {
@@ -1560,6 +1578,48 @@ struct IRVisitor {
             if (structure.name && ir.isDrop(value.type)) {
                 ir.drop(ir.release(value));
             }
+        }
+
+        void operator()(ast::DestructureVariant& variant, Value value) {
+            Value rawValue = std::holds_alternative<type::Named>(value.type) ? ir.extract(value, 0) : value;
+
+            auto& type = std::get<type::Variant>(rawValue.type);
+            auto found = ranges::find(type.variants, variant.name.value, &std::pair<std::string, Type>::first);
+            auto index = std::distance(type.variants.begin(), found);
+            auto discriminant = ir.builder->CreateExtractValue(rawValue, 0);        
+            Type valueType = found->second;
+
+            rawValue = ir.suspend(rawValue);
+            emitGuard(ir.builder->CreateICmpEQ(discriminant, ir.getInt(64, index))
+            );
+            rawValue = ir.release(rawValue);
+            auto variantValue = ir.createEntryBlockAlloca(ir.asLLVM(type));
+            ir.builder->CreateStore(rawValue, variantValue);
+            auto cast = ir.builder->CreateLoad(ir.asLLVM(valueType), ir.gep({variantValue, {}, rawValue.type}, {ir.getInt(32, 0)}));
+            if (variant.pattern) {
+                (*this)(*variant.pattern, {cast, rawValue.owner, valueType});
+            } else {
+                assignBinding({cast, rawValue.owner, valueType});
+            }
+            
+        }
+
+        void operator()(ast::DestructureUnion& _union, Value value) {
+            Value rawValue = std::holds_alternative<type::Named>(value.type) ? ir.extract(value, 0) : value;
+
+            auto& type = std::get<type::Union>(rawValue.type);
+            auto found = ranges::find(type.elements, _union.type);
+            auto index = std::distance(type.elements.begin(), found);
+            auto discriminant = ir.builder->CreateExtractValue(rawValue, 0);        
+
+            rawValue = ir.suspend(rawValue);
+            emitGuard(ir.builder->CreateICmpEQ(discriminant, ir.getInt(64, index))
+            );
+            rawValue = ir.release(rawValue);
+            auto _unionValue = ir.createEntryBlockAlloca(ir.asLLVM(type));
+            ir.builder->CreateStore(rawValue, _unionValue);
+            auto cast = ir.builder->CreateLoad(ir.asLLVM(_union.type), ir.gep({_unionValue, {}, rawValue.type}, {ir.getInt(32, 0)}));
+            (*this)(*_union.fields, {cast, rawValue.owner, _union.type});
         }
 
         void operator()(ast::DestructureVector& vector, Value value) {
@@ -1597,7 +1657,6 @@ struct IRVisitor {
             Value ptr = ir.extract(rawVec, 0);
 
             std::vector<Value> boundValues{};
-            std::cout << "REST OFFSET: " << restOffset << std::endl;
             for (size_t i = 0; i < vector.items.size(); ++i) {
                 if (ast::Pattern* pattern =
                         std::get_if<ast::Pattern>(&vector.items[i].value)) {
@@ -1643,7 +1702,6 @@ struct IRVisitor {
 
             auto item = boundValues.begin();
             for (size_t i = 0; i < vector.items.size(); ++i) {
-                std::cout << "devec 1" << std::endl;
                 std::visit(
                     match{
                         [&](ast::RestElements& rest) {
@@ -1685,7 +1743,6 @@ struct IRVisitor {
         if (isNever(value)) {
             return never;
         }
-        fmt::println("THE owner {}", value.owner.index());
         BindPattern{*this, nullptr}(let.binding, value);
         return null();
     }
@@ -1710,16 +1767,6 @@ struct IRVisitor {
         if (function->definition->annotation) {
             return;
         }
-        std::cout << "CHECK FUNC: " << function->definition->name.value
-                  << std::endl;
-        
-        for (auto& t : function->blockTypeArguments) {
-            fmt::println("block {}", t);
-        }
-
-        for (auto& t : function->typeArguments) {
-            fmt::println("local {}", t);
-        }
 
         auto entry = createBlock("entry");
         function->asLLVM->insert(function->asLLVM->end(), entry);
@@ -1730,13 +1777,11 @@ struct IRVisitor {
         auto arg = function->asLLVM->args().begin();
         ast::Binding temp;
         if (function->thisType) {
-            std::cout << ":bind this " << *function->thisType << std::endl;
             cleanupStack.push_back({&*arg, *function->thisType});
             ++arg;
         }
         size_t i = 0;
         while (arg != function->asLLVM->args().end()) {
-            std::cout << ":bind arg" << std::endl;
             cleanupStack.push_back(
                 {&*arg, with(
                             *blockTypeArguments, *typeArguments,
@@ -1746,11 +1791,6 @@ struct IRVisitor {
             ++arg;
             ++i;
         }
-
-        std::cout << "looking for trait bounds" << std::endl;
-
-        std::cout << "got both " << function->definition->name.value
-                  << std::endl;
 
         auto currentStackSize = builder->CreateLoad(type::integer.asLLVM, stackSize);
         auto stackOverflow = createBlock("stackoverflow");
@@ -1799,7 +1839,6 @@ struct IRVisitor {
         functions["rtMove"] = createSignature(moveFunc, "rtMove");
         functions["rtSlice"] = createSignature(sliceFunc, "rtSlice");
         functions["rtFree"] = createSignature(freeFunc, "rtFree");
-        std::cout << "sigs done" << std::endl;
 
         rtStackOverflowError = llvm::Function::Create(
             llvm::FunctionType::get(
@@ -1876,10 +1915,8 @@ struct IRVisitor {
             llvm::Function::ExternalLinkage, "main", currentModule.get()
         );
         auto mainBlock = createBlock("entry");
-        std::cout << "generating body..." << std::endl;
         llvmFunc->insert(llvmFunc->end(), mainBlock);
         builder->SetInsertPoint(mainBlock);
-        std::cout << "generating body..." << std::endl;
         auto result = (*this)(mainFunction->body);
         if (!isNever(result)) {
             builder->CreateRet(result);
@@ -1918,7 +1955,6 @@ struct IRVisitor {
 
     std::string nameOf(type::Named const& named) {
         std::string mono{named.declaration->fullName};
-        fmt::println("OF {}", named.declaration->name.value);
         mono.append(nameOf(named.typeArguments));
         return std::move(mono);
     }
@@ -1945,6 +1981,28 @@ struct IRVisitor {
         return std::move(name);
     }
 
+    std::string nameOf(type::Variant const& structure) {
+        std::string name{"{"};
+        for (auto& [property, type] : structure.variants) {
+            name.append(property);
+            name.append(":");
+            name.append(nameOf(type));
+            name.append("|");
+        }
+        name.append("}");
+        return std::move(name);
+    }
+
+    std::string nameOf(type::Union const& tuple) {
+        std::string name{"("};
+        for (auto& type : tuple.elements) {
+            name.append(nameOf(type));
+            name.append("|");
+        }
+        name.append(")");
+        return std::move(name);
+    }
+
     std::string nameOf(type::BuiltIn* const& builtIn) {
         return std::string{builtIn->name};
     }
@@ -1955,36 +2013,31 @@ struct IRVisitor {
                                        : (*typeArguments)[parameter.index]
         );
     }
-
+    
     llvm::Type* asLLVM(type::Named const& type) {
-        std::cout << "get named" << std::endl;
         auto name = nameOf(type);
         auto& monomorph = namedTypes[name];
         if (!monomorph) {
-            std::cout << "no mono " << type.typeArguments.size() << std::endl;
-            std::cout << type.declaration->proto << std::endl;
             auto resT = with(type.typeArguments, {}, type.declaration->proto);
-            std::cout << "no mono2" << std::endl;
+            auto fieldT = asLLVM(std::move(resT));
             auto asLLVMStruct = llvm::StructType::create(
-                *context, {asLLVM(std::move(resT))}, name, false
+                *context, {fieldT}, name, false
             );
-            std::cout << "asllvm created" << std::endl;
             monomorph = new TypeMonomorph{asLLVMStruct};
         }
-        std::cout << "got named" << std::endl;
         return monomorph->asLLVM;
     }
 
     llvm::Type* asLLVM(type::BuiltIn* const& type) {
-        std::cout << "so, it is here indeed - " << type->name << type->asLLVM
-                  << std::endl;
         return type->asLLVM;
     }
 
     llvm::Type* asLLVM(type::Tuple const& type) {
         std::vector<llvm::Type*> fields;
         for (auto& field : type.fields) {
-            fields.push_back(asLLVM(field));
+            auto fieldType = asLLVM(field);
+            // fieldType.asLLVM
+            fields.push_back(fieldType);
         }
         return llvm::StructType::get(*context, fields, false);
     }
@@ -1994,6 +2047,30 @@ struct IRVisitor {
         for (auto& [_, property] : type.properties) {
             fields.push_back(asLLVM(property));
         }
+        return llvm::StructType::get(*context, fields, false);
+    }
+
+    llvm::Type* asLLVM(type::Union const& type) {
+        size_t maxSize = 0;
+        for (auto& field : type.elements) {
+            auto size = currentModule->getDataLayout().getTypeAllocSize(asLLVM(field));
+            maxSize = size > maxSize ? size : maxSize;
+        }
+        size_t blocks = maxSize / 8;
+        if (maxSize % 8 != 0) ++blocks;
+        std::vector<llvm::Type*> fields{llvm::Type::getInt64Ty(*context), llvm::ArrayType::get(llvm::Type::getInt64Ty(*context), blocks)};
+        return llvm::StructType::get(*context, fields, false);
+    }
+
+    llvm::Type* asLLVM(type::Variant const& type) {
+        size_t maxSize = 0;
+        for (auto& [_, property] : type.variants) {
+            auto size = currentModule->getDataLayout().getTypeAllocSize(asLLVM(property));
+            maxSize = size > maxSize ? size : maxSize;
+        }
+        size_t blocks = maxSize / 8;
+        if (maxSize % 8 != 0) ++blocks;
+        std::vector<llvm::Type*> fields{llvm::Type::getInt64Ty(*context), llvm::ArrayType::get(llvm::Type::getInt64Ty(*context), blocks)};
         return llvm::StructType::get(*context, fields, false);
     }
 
@@ -2078,6 +2155,48 @@ struct IRVisitor {
                     }
                     indices.pop_back();
                 },
+                [&](type::Variant const& variant) {
+                    indices.push_back(0);
+                    auto discriminant = builder->CreateExtractValue(value, indices);
+                    indices.back() = 1;
+                    auto body = builder->CreateExtractValue(value, indices);
+                    indices.pop_back();
+                    auto afterSwitch = createBlock("afterswitch");
+                    llvm::SwitchInst * _switch = builder->CreateSwitch(discriminant, afterSwitch);
+                    for (auto&& [i, element] : variant.variants | views::enumerate) {
+                        auto block = createBlock("elem");
+                        _switch->addCase(llvm::ConstantInt::get(*context, llvm::APInt(64, i)), block);
+                        appendAndSetInsertTo(block);
+                        auto elemType = asLLVM(element.second);
+                        auto alloc = createEntryBlockAlloca(body->getType());
+                        builder->CreateStore(body, alloc);
+                        auto elementValue = builder->CreateLoad(elemType, alloc);
+                        drop({elementValue, {}, element.second});
+                        builder->CreateBr(afterSwitch);
+                    }
+                    appendAndSetInsertTo(afterSwitch);
+                },
+                [&](type::Union const& _union) {
+                    indices.push_back(0);
+                    auto discriminant = builder->CreateExtractValue(value, indices);
+                    indices.back() = 1;
+                    auto body = builder->CreateExtractValue(value, indices);
+                    indices.pop_back();
+                    auto afterSwitch = createBlock("afterswitch");
+                    llvm::SwitchInst * _switch = builder->CreateSwitch(discriminant, afterSwitch);
+                    for (auto&& [i, element] : _union.elements | views::enumerate) {
+                        auto block = createBlock("elem");
+                        _switch->addCase(llvm::ConstantInt::get(*context, llvm::APInt(64, i)), block);
+                        appendAndSetInsertTo(block);
+                        auto elemType = asLLVM(element);
+                        auto alloc = createEntryBlockAlloca(body->getType());
+                        builder->CreateStore(body, alloc);
+                        auto elementValue = builder->CreateLoad(elemType, alloc);
+                        drop({elementValue, {}, element});
+                        builder->CreateBr(afterSwitch);
+                    }
+                    appendAndSetInsertTo(afterSwitch);
+                },
                 [](type::Parameter&) {
                     fmt::println("this is rly bad");
                     throw "";
@@ -2111,14 +2230,10 @@ struct IRVisitor {
     Value copy(Value value) {
         auto resolvedType = 
             with(*blockTypeArguments, *typeArguments, value.type);
-        std::cout << "COPY? " << resolvedType << std::endl;
         if (value.owner.index() == 0) {
-            fmt::println("No, it's owned");
             return value;
         }
 
-        std::cout << value.owner.index() << " copying value of type "
-                  << resolvedType << std::endl;
         if (auto copyImpl =
                 implScope.tryFind(resolvedType, Trait{copyDeclaration, {}})) {
             std::vector<Value> args;
@@ -2138,7 +2253,6 @@ struct IRVisitor {
     void drop(
         llvm::Value* value, Type const& type, std::vector<unsigned int>& indices
     ) {
-        std::cout << "letsa drop" << std::endl;
         if (auto dropImpl =
                 implScope.tryFind(type, Trait{dropDeclaration, {}})) {
             std::vector<Value> args;
@@ -2171,7 +2285,6 @@ struct IRVisitor {
             callTraitMethod(
                 {value, 0, resolvedType}, 0, {}, dropImpl.value(), args
             );
-            return;
         }
 
         std::vector<unsigned int> indices{};
@@ -2179,8 +2292,6 @@ struct IRVisitor {
     }
 
     Value take(ast::Expression& expression) {
-        std::cout << "take attempted" << std::endl;
-
         return std::visit(
             match{
                 [this](auto& value) { return (*this)(std::move(value)); },
@@ -2247,12 +2358,10 @@ std::optional<std::tuple<std::unique_ptr<llvm::LLVMContext>, std::unique_ptr<llv
 
     ir.vecDeclaration = tc.typeScope.at("std::Vector");
     ir.stringDeclaration = tc.typeScope.at("std::String");
-    fmt::println("here");
     ir.allocFunc = Function{tc.funcScope.at("std::rtAlloc"), {}};
     ir.sliceFunc = Function{tc.funcScope.at("std::rtSlice"), {}};
     ir.freeFunc = Function{tc.funcScope.at("std::rtFree"), {}};
     ir.moveFunc = Function{tc.funcScope.at("std::rtMove"), {}};
-    fmt::println("aaaa");
     ir.copyDeclaration = tc.traitScope.at("std::Copy");
     ir.dropDeclaration = tc.traitScope.at("std::Drop");
     ir.modules = &modules;

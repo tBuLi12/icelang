@@ -2,6 +2,7 @@
 #define ICY_UTILS_H
 
 
+#include <optional>
 #include <variant>
 #include <memory>
 #include <algorithm>
@@ -24,6 +25,11 @@ concept VariantElement = contains<T, V>;
 template <class T> class UPtr : public std::unique_ptr<T> {
   public:
     UPtr(T&& value) : std::unique_ptr<T>(new T{std::move(value)}){};
+    UPtr(std::optional<T>&& value) : std::unique_ptr<T>(value ? new T{std::move(*value)} : nullptr){};
+    UPtr(UPtr<T>&& value) noexcept = default;
+    UPtr& operator=(UPtr<T>&& value) noexcept = default;
+    UPtr(T* ptr) : std::unique_ptr<T>(ptr){};
+    // UPtr& operator=(UPtr<T> const& value) = default;
 };
 
 template <class Out, class In> struct PushUnique;

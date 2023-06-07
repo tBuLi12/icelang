@@ -4,9 +4,15 @@
 #include "../lexer/lexer.h"
 #include "../utils.h"
 #include "./grammar.h"
+#include "ast.h"
+#include "fmt/core.h"
+#include "range/v3/algorithm/move.hpp"
+#include "range/v3/iterator/insert_iterators.hpp"
 #include <fmt/format.h>
+#include <optional>
 #include <sstream>
 #include <tuple>
+#include <variant>
 
 // macro, because clang doesn't like the type alias template
 #define PARSED(type) typename decltype(parse(Rule<type>{}))::value_type
@@ -163,6 +169,10 @@ template <> constexpr String expected<Path> = "an identifier";
 template <> constexpr String expected<Visibility> = "a visibility specifier";
 template <> constexpr String expected<FunctionDeclaration> = "fun";
 template <> constexpr String expected<Mutability> = "fun or mut";
+template <> constexpr String expected<TypeOpen> = "a type name";
+template <> constexpr String expected<TypeOpenUnion> = "a type name";
+template <> constexpr String expected<TypeName> = "a type name";
+template <> constexpr String expected<DestructureVariant> = ".";
 
 template <class L, class... ops>
 constexpr String expected<PrecedenceGroup<L, ops...>> = expected<L>;
@@ -484,20 +494,28 @@ class Parser : public logs::MessageLog {
     }
 
     std::optional<Expression> parse(Rule<Expression>) {
-        auto parsed = parse(orExpression + option("="_p + expression));
+        auto parsed = parse(orExpression);
         if (!parsed) {
             return {};
         }
 
-        auto [lhs, rhs] = std::move(parsed->value);
-        if (rhs) {
+        if (auto rhs = parse("="_p + expression)) {
             return Binary<"=">{
-                parsed->span,
-                std::move(lhs),
-                std::move(rhs.value()),
+                spanOf(*parsed).to(rhs->span),
+                std::move(*parsed),
+                std::move(rhs->value),
             };
         }
-        return std::optional{std::move(lhs)};
+
+        if (auto rhs = parse("+="_p + expression)) {
+            return Binary<"+=">{
+                spanOf(*parsed).to(rhs->span),
+                std::move(*parsed),
+                std::move(rhs->value),
+            };
+        }
+
+        return std::optional{std::move(*parsed)};
     }
 
     std::optional<Expression>
@@ -516,7 +534,7 @@ class Parser : public logs::MessageLog {
     }
 
     std::optional<Expression>
-    parse(Rule<std::variant<Variable, StructLiteral>>) {
+    parse(Rule<std::variant<Variable, StructLiteral, VariantLiteral>>) {
         auto name = parse(path);
         if (!name) {
             return {};
@@ -533,11 +551,35 @@ class Parser : public logs::MessageLog {
                 name->span.to(literal->span),
                 std::move(literal->value),
                 NamedType{
-                    name->span.to(typeArguments->span),
+                    name->span.to(typeArguments ? typeArguments->span : Span::null()),
                     {},
                     name.value(),
                     std::move(tArgs)},
             }};
+        }
+
+        auto variant = parse(variantLiteral);
+        if (variant) {
+            if (!variant->value && !typeArguments) {
+                return Expression{
+                    PropertyAccess{
+                        variant->span,
+                        Expression{Variable{name->span, std::move(*name)}},
+                        {},
+                        std::move(variant->variant)
+                    }
+                };
+            }
+
+            auto tArgs = typeArguments ? std::move(typeArguments->value)
+                                       : std::vector<TypeName>{};
+            variant->name = NamedType{
+                    name->span.to(typeArguments ? typeArguments->span : Span::null()),
+                    {},
+                    name.value(),
+                    std::move(tArgs)};
+            variant->span = name->span.to(variant->span);
+            return Expression{std::move(*variant)};
         }
 
         if (!typeArguments) {
@@ -565,7 +607,17 @@ class Parser : public logs::MessageLog {
         };
     }
 
-    std::optional<Pattern> parse(Rule<Pattern>) {
+    // std::optional<Destructure> parse(Rule<Destructure>) {
+    //     auto result = parse(destructureStruct | destructureTuple | destructureVector | destructureVariant);
+    //     if (!result) return {};
+        
+    //     if (auto annotation = parse("as"_kw + typeName)) {
+    //         return Destructure{DestructureValue{DestructureUnion{spanOf(*result).to(annotation->span), Pattern{}}}};
+    //     }
+    //     return Destructure{make<DestructureValue>(std::move(*result))};
+    // }
+
+    std::optional<Pattern> parsePattern() {
         auto name = parse(path);
         if (name) {
             auto tuple = parse(destructureTuple);
@@ -588,6 +640,7 @@ class Parser : public logs::MessageLog {
             Expression guardPattern{
                 Variable{name->span, std::move(name.value())}};
             continueParsingExpression(guardPattern, guard);
+            fmt::println("guard {} {}", guardPattern, currentToken.index());
             return Pattern{spanOf(guardPattern), std::move(guardPattern), {}};
         }
         auto parsed = parse(destructure);
@@ -601,6 +654,28 @@ class Parser : public logs::MessageLog {
                 spanOf(expression.value()), std::move(expression.value()), {}};
         }
 
+        return {};
+    }
+
+    std::optional<DestructureVariant> parse(Rule<DestructureVariant>) {
+        auto parsed = parse("."_p + ident + option("as"_kw + pattern));
+        if (!parsed) return {};
+        auto [name, pat] = std::move(parsed->value);
+        if (pat) {
+            return DestructureVariant{parsed->span, std::move(name), std::move(*pat)};
+        }
+        return DestructureVariant{parsed->span, std::move(name), nullptr};
+    }
+
+    std::optional<Pattern> parse(Rule<Pattern>) {
+        if (auto pattern = parsePattern()) {
+            auto annotation = parse(":"_p + typeName);
+            if (annotation)
+                return parseExplicitGuard(PatternBody{
+                    Destructure{DestructureUnion{pattern->span.to(annotation->span), std::move(*pattern), std::move(annotation->value)}}
+                });
+            return pattern;
+        }
         return {};
     }
 
@@ -707,6 +782,90 @@ class Parser : public logs::MessageLog {
         return {};
     }
 
+    std::optional<TypeName> parse(Rule<TypeOpenUnion>) {
+        auto firstPipe = parse("|"_p);
+        auto first = parse(typeName);
+        if (!first) {
+            if (firstPipe) {
+                return TypeName{UnionType{firstPipe->span}};
+            }
+            return {};
+        }
+
+        if (parse("|"_p)) {
+            auto rest = mustParse(separatedWith<"|">(typeName));
+            rest.value.insert(rest.value.begin(), std::move(*first));
+            return TypeName{UnionType{spanOf(*first), std::move(rest.value)}};
+        }
+
+        return {std::move(*first)};
+    }
+
+    std::optional<TypeName> parse(Rule<TypeOpen>) {
+        auto [span, rest] = mustParse(separatedWithTrailing<",">(typeOpenUnion));
+        if (rest.first.size() == 1 && !rest.second) {
+            return {std::move(rest.first[0])}; 
+        }
+        return TypeName{TupleType{span, std::move(rest.first)}};
+    }
+
+    std::optional<TypeName> parse(Rule<TypeName>) {
+        if (auto brace = parse("{"_p)) {
+            auto firstPipe = parse("|"_p).has_value();
+            auto first = parse(variantDeclaration);
+            if (!first) {
+                auto closing = mustParse("}"_p);
+                if (firstPipe)
+                    return TypeName{VariantType{brace->span.to(closing.span)}};
+                return TypeName{StructType{brace->span.to(closing.span)}};
+            }
+
+            if (parse("|"_p)) {
+                auto rest = mustParse(separatedWith<"|">(variantDeclaration));
+                rest.value.insert(rest.value.begin(), std::move(*first));
+                auto closing = mustParse("}"_p);
+                return TypeName{VariantType{brace->span.to(closing.span), std::move(rest)}};
+            }
+
+            firstPipe = firstPipe || !first->typeName.has_value();
+            if (!firstPipe && parse(","_p)) {
+                auto rest = mustParse(separatedWith<",">(propertyDeclaration));
+                rest.value.insert(rest.value.begin(), PropertyDeclaration{first->span, first->name, std::move(*first->typeName)});
+                auto closing = mustParse("}"_p);
+                return TypeName{StructType{brace->span.to(closing.span), std::move(rest)}};
+            }
+
+            auto closing = mustParse("}"_p);
+            if (!firstPipe) {
+                StructType tpl{brace->span.to(closing.span)};
+                tpl.properties.push_back(PropertyDeclaration{first->span, first->name, std::move(*first->typeName)});
+                return TypeName{std::move(tpl)};
+            }
+            VariantType v{brace->span.to(closing.span)};
+            v.variants.push_back(std::move(*first));
+            return {TypeName{std::move(v)}}; 
+        }
+
+        if (auto paren = parse("("_p)) {
+            auto inner = parse(typeOpen);
+            auto closing = mustParse(")"_p);
+            if (inner) {
+                // if (std::holds_alternative<TupleType>(inner->value)) {
+                    return inner;
+                // }
+                // TupleType v{paren->span.to(closing.span)};
+                // v.fields.push_back(std::move(*inner));
+                // return {TypeName{std::move(v)}}; 
+            };
+            return TypeName{TupleType{paren->span.to(closing.span)}};
+        }
+
+        if (auto vec = parse(vectorType)) {
+            return TypeName{std::move(*vec)};
+        }
+        return TypeName{mustParse(namedType)};
+    }
+
     std::optional<Path> parse(Rule<Path>) {
         auto first = parse(ident);
         if (!first)
@@ -755,31 +914,70 @@ class Parser : public logs::MessageLog {
 
     std::optional<std::variant<Implementation, TraitImplementation>>
     parseImplementation() {
-        auto parsed = parse(
-            "def"_kw + typeParameterList + typeName +
-            option("as"_kw + traitName) + "{"_p + list(Rule<FunctionWithVisibility>{}) +
-            "}"_p
-        );
+        auto parsed = parse("def"_kw + typeParameterList + typeName);
         if (!parsed) {
             return {};
         }
 
-        auto [tParamList, type, trait, declarations] = std::move(parsed->value);
-        if (trait) {
-            return TraitImplementation{
-                parsed->span,
-                std::move(tParamList),
-                std::move(type),
-                std::move(trait.value()),
-                std::move(declarations),
-            };
+        auto [tParamList, type] = std::move(parsed->value);
+        if (parse("as"_kw)) {
+            auto traitNameVal = mustParse(traitName);
+            if (auto decls = parse("{"_p + list(Rule<FunctionWithVisibility>{}) + "}"_p)) {
+                return TraitImplementation {
+                    parsed->span.to(decls->span),
+                    std::move(tParamList),
+                    std::move(type),
+                    std::move(traitNameVal),
+                    std::move(decls->value),
+                };
+            } else {
+                auto decl = mustParse(Rule<FunctionWithVisibility>{});
+                std::vector<FunctionDeclaration> funcs{};
+                funcs.emplace_back(std::move(decl));
+                return TraitImplementation {
+                    parsed->span.to(decl.span),
+                    std::move(tParamList),
+                    std::move(type),
+                    std::move(traitNameVal),
+                    std::move(funcs),
+                };
+            }
         }
 
-        return Implementation{
-            parsed->span,
+        auto whereClause = parse("where"_kw + separatedWith<",">(traitBound));
+        // auto traitBounds = whereClause ? whereClause.v
+
+        if (auto decls = parse("{"_p + list(Rule<FunctionWithVisibility>{} | promotion) + "}"_p)) {
+            std::vector<Promotion> promotions{};
+            std::vector<FunctionDeclaration> funcs{};
+            for (auto& decl : decls->value) {
+                std::visit(match{
+                    [&](FunctionDeclaration&& func) { funcs.emplace_back(std::move(func)); },
+                    [&](Promotion&& promotion) { promotions.emplace_back(std::move(promotion)); },
+                }, std::move(decl));
+            }
+            return Implementation {
+                parsed->span.to(decls->span),
+                std::move(tParamList),
+                std::move(type),
+                std::move(funcs),
+                std::move(promotions),
+            };
+        } 
+
+        auto decl = mustParse(Rule<FunctionWithVisibility>{} | promotion);
+        std::vector<Promotion> promotions{};
+        std::vector<FunctionDeclaration> funcs{};
+        std::visit(match{
+            [&](FunctionDeclaration&& func) { funcs.emplace_back(std::move(func)); },
+            [&](Promotion&& promotion) { promotions.emplace_back(std::move(promotion)); },
+        }, std::move(decl));
+        return Implementation {
+            parsed->span.to(spanOf(decl)),
             std::move(tParamList),
             std::move(type),
-            std::move(declarations),
+            std::move(funcs),
+            std::move(promotions),
         };
     }
 
@@ -840,8 +1038,11 @@ class Parser : public logs::MessageLog {
 
 std::pair<ast::Program, logs::MessageLog> parseProgram(Source source) {
     parser::Parser parser{source};
+    ranges::move(parser.lexer.diagnostics, ranges::back_inserter(parser.diagnostics));
+    auto program = parser.parseProgram();
+    fmt::println("ast dump: {}", program);
     return {
-        parser.parseProgram(),
+        std::move(program),
         std::move(static_cast<logs::MessageLog>(parser))};
 }
 

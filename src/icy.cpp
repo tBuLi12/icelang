@@ -52,9 +52,7 @@ std::pair<std::string, std::filesystem::path> moduleIdFromPath(
         tail = {++colon, path.end()};
     }
 
-    std::cout << "getting segmentrs" << std::endl;
     auto segments = splitBySlash(tail);
-    std::cout << "got segments " << segments.size() << std::endl;
 
     if (segments.size() > 0 && !(segments.front() == "." || segments.front() == "..")) {
         curPath = packages[std::string{pckgName}].path->parent_path();
@@ -88,7 +86,7 @@ std::pair<std::string, std::filesystem::path> moduleIdFromPath(
     }
 
     if (idSegments.size() == 2 && idSegments[0] == idSegments[1])
-    idSegments.pop_back();
+        idSegments.pop_back();
 
     curPath.replace_extension(".ice");
 
@@ -113,7 +111,6 @@ int main(int argc, char* argv[]) {
     std::optional<std::string> fid;
     for (size_t i = 1; i < argc; ++i) {
         auto package = packageIdFromPath(argv[i]);
-            std::cout <<  " GET PCKG " << package.pathStr << std::endl;
         if (!fid) {
             fid = package.id;
         }
@@ -142,7 +139,6 @@ int main(int argc, char* argv[]) {
             throw "";
         }
         Source source{*files.back(), package.pathStr};
-            std::cout << package.pathStr << " IS THE path" << std::endl;
         auto [program, log] = parseProgram(source);
         if (!log.errorsAreEmpty()) {
             log.printDiagnosticsTo(std::cerr);
@@ -152,13 +148,10 @@ int main(int argc, char* argv[]) {
     }
 
     for (size_t idx = 1; idx < modules.size(); ++idx) {
-        std::cout << "processing module " << idx << std::endl;
         for (auto& import : modules[idx]->program.imports) {
-            std::cout << "processing import " << import.path.value << std::endl;
             auto [moduleId, path] = moduleIdFromPath(
                 packages, import.path.value, *modules[idx]
             );
-            std::cout << "resolved" << std::endl;
             auto maybeMod = std::ranges::find(modules, moduleId, &Module::moduleId);
             if (maybeMod !=
                 modules.end()) {
@@ -216,5 +209,6 @@ int main(int argc, char* argv[]) {
     passManager.run(*llvmModule);
     outputFile.flush();
         std::cerr << "done" << std::endl;
+    llvmModule.reset();
     return 0;
 }

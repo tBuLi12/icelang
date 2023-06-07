@@ -45,18 +45,6 @@ public type Vector<T> {
 @extern fun rtPrint(buf: @ptr int, len: int) {}
 @extern fun dbgPrint(): int {}
 
-fun push<T>(vector: Vector<T>, item: T): Vector<T> {
-    T.size;
-    var vec = vector;
-    if (vec.length == vec.capacity) {
-        vec.buffer = rtRealloc(vec.buffer, T.size * vec.capacity);
-        vec.capacity = 2 * vec.capacity;
-    };
-    vec[vec.length] = item;
-    vec.length = vec.length + 1;
-    vec
-}
-
 public type String public [char]
 
 def String {
@@ -93,6 +81,15 @@ def<T> [T] {
         let popped = ~this[this.length - 1];
         this.length = this.length - 1;
         popped
+    }
+
+    public mut push(item: T) {
+        if (this.length == this.capacity) {
+            this.buffer = rtRealloc(this.buffer, T.size * this.capacity);
+            this.capacity = 2 * this.capacity;
+        };
+        this.length = this.length + 1;
+        ~this[this.length] = item;
     }
 }
 

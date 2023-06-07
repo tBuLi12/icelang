@@ -5,7 +5,9 @@
 #include "../semanticAnalyzer/types.h"
 #include "../utils.h"
 
+#include <memory>
 #include <optional>
+#include <variant>
 #include <vector>
 #include <filesystem>
 #include <unordered_map>
@@ -13,10 +15,10 @@
 using Lexer = lexer::WithPunctuations<
     ",", ".", "(", ")", "[", "]", "<", ">", "<=", ">=", "->", "{", "}", ":",
     ":<", "/", "*", "+", "-", ";", "=", "!", "==", "!=", "&&", "||", "..", "=>",
-    "&", "@", "::", "~">::
+    "&", "@", "::", "~", "|", "+=">::
     Lexer<
         "fun", "type", "break", "return", "continue", "if", "while", "else",
-        "match", "let", "var", "as", "is", "trait", "def", "import", "public", "internal", "mut">;
+        "match", "let", "var", "as", "is", "trait", "def", "import", "public", "internal", "mut", "promote">;
 
 template <class T>
 concept Token = contains<T, Lexer::Token>;
@@ -65,7 +67,7 @@ struct If {
     Span span;
     UPtr<Condition> condition;
     UPtr<Expression> trueBranch;
-    std::optional<UPtr<Expression>> falseBranch;
+    UPtr<Expression> falseBranch;
     bool hasSameTypeBranch;
     Type type;
 };
@@ -113,10 +115,21 @@ struct TupleType {
 };
 
 struct PropertyDeclaration;
+struct VariantDeclaration;
 
 struct StructType {
     Span span;
     std::vector<PropertyDeclaration> properties;
+};
+
+struct UnionType {
+    Span span;
+    std::vector<TypeName> elements;
+};
+
+struct VariantType {
+    Span span;
+    std::vector<VariantDeclaration> variants;
 };
 
 struct VectorType {
@@ -125,7 +138,7 @@ struct VectorType {
 };
 
 struct TypeName {
-    std::variant<NamedType, TupleType, StructType, VectorType> value;
+    std::variant<NamedType, TupleType, StructType, VectorType, UnionType, VariantType> value;
 };
 
 struct Cast {
@@ -159,6 +172,12 @@ struct PropertyDeclaration {
     Span span;
     std::string name;
     TypeName typeName;
+};
+
+struct VariantDeclaration {
+    Span span;
+    std::string name;
+    std::optional<TypeName> typeName;
 };
 
 struct TupleLiteral {
@@ -272,6 +291,16 @@ struct TypeExpression {
     Type type;
 };
 
+struct VariantLiteral {
+    Span span;
+    lexer::Identifier variant;
+    UPtr<Expression> value;
+    std::optional<NamedType> name;
+
+    std::optional<type::Named> namedType;
+    Type type;
+};
+
 using ExpressionValue = std::variant<
     Variable, Block, lexer::IntegerLiteral, lexer::FloatLiteral,
     lexer::StringLiteral, lexer::CharLiteral, TupleLiteral, StructLiteral, If, While, Match, Call,
@@ -279,7 +308,7 @@ using ExpressionValue = std::variant<
     Binary<"*">, Binary<"==">, Binary<"!=">, Binary<"&&">, Binary<"||">,
     Binary<">=">, Binary<"<=">, Binary<"<">, Binary<">">, Binary<"=">,
     Binary<"/">, Binary<"-">, Prefix<"-">, Prefix<"!">, Prefix<"~">, VectorLiteral,
-    TypeExpression>;
+    TypeExpression, VariantLiteral, Binary<"+=">>;
 
 struct Expression {
     ExpressionValue value;
@@ -328,8 +357,24 @@ struct DestructureVector {
     Type elementType;
 };
 
+struct DestructureUnion {
+    Span span;
+    UPtr<Pattern> fields;
+    TypeName name;
+
+    Type type;
+};
+
+struct DestructureVariant {
+    Span span;
+    lexer::Identifier name;
+    UPtr<Pattern> pattern;
+
+    Type type;
+};
+
 using DestructureValue =
-    std::variant<DestructureStruct, DestructureTuple, DestructureVector>;
+    std::variant<DestructureStruct, DestructureTuple, DestructureVector, DestructureUnion, DestructureVariant>;
 
 struct Destructure {
     DestructureValue value;
@@ -363,7 +408,7 @@ struct Pattern {
     std::optional<Expression> guard;
 
     Pattern(DestructureTuple&& destructure);
-    Pattern(Span _span, PatternBody&& _body, std::optional<Expression>&& guard);
+    Pattern(Span _span, PatternBody&& _body, std::optional<Expression>&& _guard);
 };
 
 struct PropertyPattern {
@@ -515,11 +560,18 @@ struct TraitImplementation {
     Module* location;
 };
 
+struct Promotion {
+    Span span;
+    lexer::Identifier property;
+};
+
 struct Implementation {
     Span span;
     std::vector<TypeParameter> typeParameterNames;
     TypeName typeName;
     std::vector<FunctionDeclaration> functions;
+    std::vector<Promotion> promotions;
+    std::vector<std::pair<TypeName, TraitName>> whereClause;
 
     Type type;
     std::vector<std::pair<Type, Trait>> traitBounds;
@@ -540,6 +592,7 @@ struct Program {
     std::vector<FunctionDeclaration> functions;
     std::vector<Import> imports;
 };
+
 } // namespace ast
 
 #ifdef __clang__
@@ -600,6 +653,20 @@ struct fmt::formatter<ast::PropertyDeclaration> : formatter<std::string> {
     auto format(ast::PropertyDeclaration const& property, auto& ctx) const {
         return fmt::format_to(
             ctx.out(), "{}:{}", property.name, property.typeName
+        );
+    }
+};
+
+template <>
+struct fmt::formatter<ast::VariantDeclaration> : formatter<std::string> {
+    auto format(ast::VariantDeclaration const& property, auto& ctx) const {
+        if (property.typeName) {
+            return fmt::format_to(
+                ctx.out(), "{}:{}", property.name, *property.typeName
+            );
+        }
+        return fmt::format_to(
+            ctx.out(), "{}", property.name
         );
     }
 };
@@ -692,6 +759,22 @@ template <> struct fmt::formatter<ast::TupleType> : formatter<std::string> {
     auto format(ast::TupleType const& tuple, auto& ctx) const {
         return fmt::format_to(
             ctx.out(), "tuple({})", fmt::join(tuple.fields, ",")
+        );
+    }
+};
+
+template <> struct fmt::formatter<ast::VariantType> : formatter<std::string> {
+    auto format(ast::VariantType const& structure, auto& ctx) const {
+        return fmt::format_to(
+            ctx.out(), "variant({})", fmt::join(structure.variants, ",")
+        );
+    }
+};
+
+template <> struct fmt::formatter<ast::UnionType> : formatter<std::string> {
+    auto format(ast::UnionType const& tuple, auto& ctx) const {
+        return fmt::format_to(
+            ctx.out(), "union({})", fmt::join(tuple.elements, ",")
         );
     }
 };
@@ -797,6 +880,18 @@ template <> struct fmt::formatter<ast::StructLiteral> : formatter<std::string> {
         }
         return fmt::format_to(
             ctx.out(), "({})", fmt::join(structure.properties, ",")
+        );
+    }
+};
+
+template <> struct fmt::formatter<ast::VariantLiteral> : formatter<std::string> {
+    auto format(ast::VariantLiteral const& structure, auto& ctx) const {
+        fmt::format_to(ctx.out(), "variant");
+        if (structure.name) {
+            fmt::format_to(ctx.out(), " {}", structure.name.value());
+        }
+        return fmt::format_to(
+            ctx.out(), ".{}", structure.variant
         );
     }
 };
@@ -914,7 +1009,7 @@ template <> struct fmt::formatter<ast::If> : formatter<std::string> {
         if (ifExpr.falseBranch) {
             return fmt::format_to(
                 ctx.out(), "if({},{},{})", *ifExpr.condition,
-                *ifExpr.trueBranch, **ifExpr.falseBranch
+                *ifExpr.trueBranch, *ifExpr.falseBranch
             );
         }
         return fmt::format_to(
@@ -989,7 +1084,7 @@ template <> struct fmt::formatter<ast::Pattern> : formatter<std::string> {
             fmt::format_to(ctx.out(), "guard(");
         }
         std::visit(
-            [&](auto const& value) { fmt::format_to(ctx.out(), "{}", value); },
+            [&](auto const& value) { fmt::format_to(ctx.out(), CLANG_RUNTIME("{}"), value); },
             pattern.body.value
         );
         if (pattern.guard) {
@@ -1060,6 +1155,28 @@ struct fmt::formatter<ast::DestructureTuple> : formatter<std::string> {
     auto format(ast::DestructureTuple const& tuple, auto& ctx) const {
         return fmt::format_to(
             ctx.out(), "p-tuple({})", fmt::join(tuple.fields, ",")
+        );
+    }
+};
+
+template <>
+struct fmt::formatter<ast::DestructureVariant> : formatter<std::string> {
+    auto format(ast::DestructureVariant const& structure, auto& ctx) const {
+        if (structure.pattern)
+            return fmt::format_to(
+                ctx.out(), "p-variant({},{})", structure.name.value, *structure.pattern
+            );
+        return fmt::format_to(
+            ctx.out(), "p-variant({})", structure.name.value
+        );
+    }
+};
+
+template <>
+struct fmt::formatter<ast::DestructureUnion> : formatter<std::string> {
+    auto format(ast::DestructureUnion const& tuple, auto& ctx) const {
+        return fmt::format_to(
+            ctx.out(), "p-union({},{})", *tuple.fields, tuple.name
         );
     }
 };
@@ -1244,6 +1361,12 @@ struct SpanPrinter {
         std::ranges::for_each(tuple.fields, *this);
     }
 
+    void operator()(ast::DestructureVariant const& structure) {
+    }
+
+    void operator()(ast::DestructureUnion const& tuple) {
+    }
+
     void operator()(ast::DestructureVector const& vector) {
         printSpan(vector);
         std::ranges::for_each(vector.items, *this);
@@ -1295,6 +1418,9 @@ struct SpanPrinter {
     void operator()(ast::TupleLiteral const& tuple) {
         printSpan(tuple);
         std::ranges::for_each(tuple.fields, *this);
+    }
+
+    void operator()(ast::VariantLiteral const& tuple) {
     }
 
     void operator()(ast::Block const& block) {
@@ -1357,7 +1483,7 @@ struct SpanPrinter {
         (*this)(*ifExpr.condition);
         (*this)(*ifExpr.trueBranch);
         if (ifExpr.falseBranch) {
-            (*this)(*ifExpr.falseBranch.value());
+            (*this)(*ifExpr.falseBranch);
         }
     }
 
@@ -1377,6 +1503,14 @@ struct SpanPrinter {
                 [&](ast::TupleType const& tuple) {
                     printSpan(tuple);
                     std::ranges::for_each(tuple.fields, *this);
+                },
+                [&](ast::VariantType const& structure) {
+                    printSpan(structure);
+                    std::ranges::for_each(structure.variants, *this);
+                },
+                [&](ast::UnionType const& tuple) {
+                    printSpan(tuple);
+                    std::ranges::for_each(tuple.elements, *this);
                 },
                 [&](ast::VectorType const& vector) {
                     printSpan(vector);
@@ -1447,6 +1581,10 @@ struct SpanPrinter {
     void operator()(ast::PropertyDeclaration const& property) {
         printSpan(property);
         (*this)(property.typeName);
+    }
+
+    void operator()(ast::VariantDeclaration const& property) {
+        printSpan(property);
     }
 
     void operator()(ast::Property const& property) {

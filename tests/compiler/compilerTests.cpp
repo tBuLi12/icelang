@@ -277,3 +277,45 @@ TEST(CompilerTest, Method) {
     )"), Result::Ok);
 }
 
+TEST(CompilerTest, AddOverload) {
+    EXPECT_EQ(jit(R"(
+        @extern fun isThirtyThree(value: int): int {}
+
+        type Test { field: int }
+
+        def Test as std::Add<Test> {
+            fun add(other: Test): Test -> Test { field: this.field + other.field }
+        }
+        
+        fun main(): int {
+            let t = Test { field: 9 } + Test { field: 24 };
+            isThirtyThree(t.field)
+        }
+    )"), Result::Ok);
+}
+
+TEST(CompilerTest, AddOverloadNoDef) {
+    EXPECT_EQ(jit(R"(
+        @extern fun isThirtyThree(value: int): int {}
+
+        type Test { field: int }
+        
+        fun main(): int {
+            let t = Test { field: 9 } + Test { field: 24 };
+            isThirtyThree(t.field)
+        }
+    )"), Result::DoesntCompile);
+}
+
+TEST(CompilerTest, Spread) {
+    EXPECT_EQ(jit(R"(
+        @extern fun isThirtyThree(value: int): int {}
+
+        fun main(): int {
+            let a = [1, 2, 4, 8, 33, 21];
+            let b = [..a, 3, 4, ..a, 8, 9, ..a];
+            isThirtyThree(b[12])
+        }
+    )"), Result::Ok);
+}
+

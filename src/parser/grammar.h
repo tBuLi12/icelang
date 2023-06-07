@@ -103,14 +103,29 @@ struct PrefixScrutinee {};
 struct FunctionBody {};
 struct FunctionWithVisibility {};
 struct Mutability {};
+struct TypeOpenUnion {};
+struct TypeOpenTuple {};
+struct TypeOpen {};
 
 template <class T> constexpr bool ruleFor = false;
 
 constexpr auto typeName = Rule<TypeName>{};
+constexpr auto typeOpenUnion = Rule<TypeOpenUnion>{};
+constexpr auto typeOpen = Rule<TypeOpen>{};
 
 template <class T> consteval auto createPrecedenceHierarchy(Rule<T>) {
     return Rule<T>{}
         .postfixGroup(as<Cast>("as"_kw + typeName))
+        .binaryGroup("*"_p, "/"_p)
+        .binaryGroup("+"_p, "-"_p)
+        .binaryGroup("<"_p, ">"_p, "<="_p, ">="_p)
+        .binaryGroup("=="_p, "!="_p)
+        .binaryGroup("&&"_p)
+        .binaryGroup("||"_p);
+}
+
+template <class T> consteval auto createGuardPrecedenceHierarchy(Rule<T>) {
+    return Rule<T>{}
         .binaryGroup("*"_p, "/"_p)
         .binaryGroup("+"_p, "-"_p)
         .binaryGroup("<"_p, ">"_p, "<="_p, ">="_p)
@@ -135,15 +150,17 @@ constexpr auto prefixGuard = Rule<PrefixGuard>{};
 constexpr auto prefixExpression = Rule<PrefixExpression>{};
 constexpr auto visibility = Rule<Visibility>{};
 constexpr auto mutability = Rule<Mutability>{};
+constexpr auto destructureVariant = Rule<DestructureVariant>{};
 
 // clang-format off
 
 RULE(Variable, variable) = path;
 RULE(Property, property) = ident + option(":"_p + expression);
 RULE(StructLiteral, structLiteral) = "{"_p + separatedWith<",">(property) + "}"_p;
+RULE(VariantLiteral, variantLiteral) = "."_p + ident + option("{"_p + expression + "}"_p);
 
 constexpr auto scrutineePrimary = as<Expression>(
-    variable | structLiteral |
+    variable | structLiteral | variantLiteral |
     (tuple | expression) | vector | character
 );
 
@@ -169,9 +186,10 @@ constexpr auto primaryGuard = as<Expression>(
 
 constexpr auto primaryExpression = as<Expression>(
     string 
-    | (Rule<Variable>{} | structLiteral) 
+    | (Rule<Variable>{} | structLiteral | variantLiteral) 
     | (structLiteral | block) 
     | (tuple | expression) 
+    | variantLiteral
     | integer 
     | character
     | floating 
@@ -182,25 +200,23 @@ constexpr auto primaryExpression = as<Expression>(
 constexpr auto postfixGuard = withPostfixes(primaryGuard);
 constexpr auto postfixExpression = withPostfixes(primaryExpression);
 constexpr auto orExpression = createPrecedenceHierarchy(prefixExpression);
-constexpr auto guard = createPrecedenceHierarchy(prefixGuard);
+constexpr auto guard = createGuardPrecedenceHierarchy(prefixGuard);
 
 constexpr auto tupleExpression = as<Expression>(singleOrMultipleAs<TupleLiteral>(expression));
 
-RULE(PropertyDeclaration, propertyDeclaration) = ident + ":"_p + typeName;
-RULE(NamedType, namedType) = option("@"_p + as<Annotation>(ident)) + path + optionOrDefault("<"_p + separatedWith<",">(typeName) + ">"_p);
-RULE(TupleType, tupleType) = "("_p + separatedWith<",">(typeName) + ")"_p;
-RULE(StructType, structType) = "{"_p + separatedWith<",">(propertyDeclaration) + "}"_p;
-RULE(VectorType, vectorType) = "["_p + typeName + "]"_p;
-RULE(TypeName, _typeName) = namedType | tupleType | structType | vectorType;
+RULE(PropertyDeclaration, propertyDeclaration) = ident + ":"_p + typeOpenUnion;
+RULE(VariantDeclaration, variantDeclaration) = ident + option(":"_p + typeName);
+RULE(NamedType, namedType) = option("@"_p + as<Annotation>(ident)) + path + optionOrDefault("<"_p + separatedWith<",">(typeOpenUnion) + ">"_p);
+RULE(VectorType, vectorType) = "["_p + typeOpen + "]"_p;
 
-RULE(TraitName, traitName) = path + optionOrDefault("<"_p + separatedWith<",">(typeName) + ">"_p);
+RULE(TraitName, traitName) = path + optionOrDefault("<"_p + separatedWith<",">(typeOpenUnion) + ">"_p);
 
 RULE(Return, _return) = "return"_kw + option(tupleExpression);
 RULE(Continue, _continue) = "continue"_kw + option(tupleExpression);
 RULE(Break, _break) = "break"_kw + option(tupleExpression);
-RULE(Parameter, parameter) = ident + ":"_p + typeName;
-RULE(LetBinding, letBinding) = "let"_kw + openPattern + option(":"_p + typeName) + "="_p + tupleExpression;
-RULE(VarBinding, varBinding) = "var"_kw + openPattern + option(":"_p + typeName) + "="_p + tupleExpression;
+RULE(Parameter, parameter) = ident + ":"_p + typeOpenUnion;
+RULE(LetBinding, letBinding) = "let"_kw + openPattern + option(":"_p + typeOpenUnion) + "="_p + tupleExpression;
+RULE(VarBinding, varBinding) = "var"_kw + openPattern + option(":"_p + typeOpenUnion) + "="_p + tupleExpression;
 
 RULE(BlockItem, blockItem)  = tupleExpression 
                             | _break 
@@ -212,19 +228,20 @@ RULE(BlockItem, blockItem)  = tupleExpression
 RULE(Spread, spread) = ".."_p + expression;
 RULE(VectorElement, vectorElement) = spread | expression;
 RULE(VectorElements, vectorElements) = separatedWith<",">(vectorElement);
-RULE(VectorElementType, vectorElementType) = ":"_p + typeName;
+RULE(VectorElementType, vectorElementType) = ":"_p + typeOpen;
 RULE(VectorLiteral, vectorLiteral) = "["_p + (vectorElementType | vectorElements) + "]"_p;
 
-RULE(PropertyPattern, propertyPattern) = guard + option(":"_p + destructure);
+RULE(PropertyPattern, propertyPattern) = guard + option("as"_kw + destructure);
 RULE(DestructureStruct, destructureStruct) = "{"_p + separatedWith<",">(propertyPattern) + "}"_p;
 RULE(DestructureTuple, destructureTuple) = "("_p + separatedWith<",">(pattern) + ")"_p;
 RULE(RestElements, restElements) = ".."_p + option(ident);
 RULE(ElementPattern, elementPattern) = restElements | pattern;
 RULE(DestructureVector, destructureVector) = "["_p + separatedWith<",">(elementPattern) + "]"_p;
-RULE(Destructure, _destructure) = destructureStruct | destructureTuple | destructureVector;
+RULE(Destructure, _destructure) = destructureStruct | destructureTuple | destructureVector | destructureVariant;
 RULE(Condition, condition) = letBinding | varBinding | expression;
 RULE(If, ifExpression) = "if"_kw + "("_p + condition + ")"_p + expression + option("else"_kw + expression);
 RULE(While, whileExpression) = "while"_kw + "("_p + condition + ")"_p + expression;
+RULE(Promotion, promotion) = "promote"_kw + ident;
 
 RULE(PrefixExpression, _prefixExpression) = as<Expression>(
     as<Prefix<"!">>("!"_p + prefixExpression) 
@@ -244,18 +261,20 @@ RULE(PrefixGuard, _prefixGuard) = as<Expression>(
 RULE(TypeParameter, typeParameter) = ident + optionOrDefault("is"_kw + separatedWith<"&">(traitName));
 constexpr auto typeParameterList = optionOrDefault("<"_p + separatedWith<",">(typeParameter) + ">"_p);
 
-RULE(Signature, signature) = option("@"_p + as<Annotation>(ident)) + mutability + ident +  typeParameterList + "("_p + separatedWith<",">(parameter) + ")"_p + option(":"_p + typeName);
-RULE(TypeDeclaration, typeDeclaration) = "type"_kw + ident + typeParameterList + visibility + typeName;
+RULE(Signature, signature) = option("@"_p + as<Annotation>(ident)) + mutability + ident +  typeParameterList + "("_p + separatedWith<",">(parameter) + ")"_p + option(":"_p + typeOpen);
+RULE(TypeDeclaration, typeDeclaration) = "type"_kw + ident + typeParameterList + visibility + typeOpen;
 RULE(TraitDeclaration, traitDeclaration) = "trait"_kw + ident + typeParameterList + "{"_p + list(signature) + "}"_p;
 RULE(FunctionBody, functionBody) = as<Expression>(as<Expression>("->"_p + tupleExpression) | as<Expression>(block));
 RULE(FunctionDeclaration, functionDeclaration) = signature + functionBody;
 RULE(Import, import) = "import"_kw + string + "as"_kw + ident;
 
+constexpr auto traitBound = as<std::pair<TypeName, TraitName>>(typeName + "is"_kw + traitName);
+
 // these rules are only used in the parsePostfixes function, but cannot be inlined because clang cries
 constexpr auto indexAccess = "["_p + tupleExpression + "]"_p;
 constexpr auto cast = "as"_kw + typeName;
 constexpr auto call =
-    optionOrDefault(":<"_p + separatedWith<",">(typeName) + ">"_p) + "("_p +
+    optionOrDefault(":<"_p + separatedWith<",">(typeOpenUnion) + ">"_p) + "("_p +
     separatedWith<",">(expression) + ")"_p;
 constexpr auto propertyAccess = option("<"_p + traitName + ">"_p) + ident;
 constexpr auto postfixMatch = "match"_kw + "{"_p + separatedWith<",">(matchCase) + "}"_p;

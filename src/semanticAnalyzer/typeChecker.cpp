@@ -1,12 +1,19 @@
 #include "../parser/ast.h"
 #include "./types.h"
+#include "fmt/core.h"
+#include "range/v3/algorithm/all_of.hpp"
 
 #include <algorithm>
 #include <filesystem>
+#include <functional>
+#include <optional>
 #include <range/v3/all.hpp>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
+#include <vcruntime.h>
+#include <vector>
 
 namespace views = ranges::views;
 
@@ -121,7 +128,6 @@ struct TraitBoundScope {
     bool includes(Trait const& checkedTrait, Type const& checkedType) const {
         if (local) {
             for (auto& [type, trait] : *local) {
-                fmt::println("SEARCHING LOCAL BOUNDS {} {} {} {}", checkedTrait ,trait ,checkedType ,type);
                 if (checkedTrait == trait && checkedType == type) {
                     return true;
                 }
@@ -138,70 +144,148 @@ struct TraitBoundScope {
     }
 };
 
-bool tryMatch(
-    std::vector<std::optional<Type>>& blockArgs,
-    std::vector<std::optional<Type>>& args, Type const& first,
-    Type const& second
-) {
-    std::cout << "matching " << first << second << std::endl;
+struct Alternatives;
+
+struct InferenceSet {
+    std::vector<std::optional<Type>> block;
+    std::vector<std::optional<Type>> local;
+
+    std::optional<Type>& operator[](type::Parameter param) {
+        if (param.isBlockParameter) {
+            if (param.index >= block.size()) {
+                block.resize(param.index + 1);
+            }
+            return block[param.index];
+        } else {
+            if (param.index >= local.size()) {
+                local.resize(param.index + 1);
+            }
+            return local[param.index];
+        }
+    }
+};
+
+Alternatives operator&(InferenceSet&& left, InferenceSet&& right);
+
+struct Alternatives {
+    std::vector<InferenceSet> inner;
+
+    Alternatives operator|(Alternatives&& right) && {
+        ranges::move(right.inner, ranges::back_inserter(inner));
+        return *this;
+    }
+
+    Alternatives operator&(Alternatives&& other) && {
+        Alternatives sum{};
+        for (auto&& [l, r] : views::cartesian_product(inner, other.inner)) {
+            sum = std::move(sum) | (std::move(l) & std::move(r));
+        }
+        return sum;
+    }
+};
+
+void makeSameSize(std::vector<std::optional<Type>>& left, std::vector<std::optional<Type>>& right) {
+    if (left.size() > right.size()) {
+        right.resize(left.size());
+    } else {
+        left.resize(right.size());
+    }
+}
+
+Alternatives operator&(InferenceSet&& left, InferenceSet&& right) {
+    makeSameSize(left.block, right.block);
+    makeSameSize(left.local, right.local);
+    InferenceSet set{};
+    set.block.resize(left.block.size());
+    set.local.resize(left.local.size());
+
+    for (auto&& [type, other, i] : views::zip(left.block, right.block, views::iota(0))) {
+        if (type && other) {
+            if (*type != *other) {
+                return Alternatives{};
+            }
+            set.block[i] = type;
+        } else if (type) {
+            set.block[i] = type;
+        } else {
+            set.block[i] = other;
+        }
+    }
+    return Alternatives{{std::move(set)}};
+}
+
+Alternatives tryMatch(Type const& first, Type const& second) {
     return std::visit(
         match{
-            [](auto const&, auto const&) { return false; },
+            [](auto const&, auto const&) { return Alternatives{}; },
             [&](type::Parameter const& parameter, auto const&) {
-                std::optional<Type>& toInfer = parameter.isBlockParameter
-                                                   ? blockArgs[parameter.index]
-                                                   : args[parameter.index];
-                if (toInfer) {
-                    return *toInfer == second;
-                }
-                toInfer = second;
-                return true;
+                InferenceSet set{};
+                set[parameter] = second;
+                return Alternatives{{std::move(set)}};
             },
             [](type::BuiltIn* const& first, type::BuiltIn* const& second) {
-                return first == second;
+                return first == second ? Alternatives{{InferenceSet{}}} : Alternatives{};
             },
             [&](type::Named const& first, type::Named const& second) {
                 if (first.declaration != second.declaration) {
-                    return false;
+                    return Alternatives{};
                 }
-                for (size_t i = 0; i < first.typeArguments.size(); ++i) {
-                    if (!tryMatch(
-                            blockArgs, args, first.typeArguments[i],
-                            second.typeArguments[i]
-                        )) {
-                        return false;
-                    }
+                Alternatives set{{InferenceSet{}}};
+                for (auto&& [l, r] : views::zip(first.typeArguments, second.typeArguments)) {
+                    set = std::move(set) & tryMatch(l, r);
                 }
-                return true;
+                return set;
             },
             [&](type::Struct const& first, type::Struct const& second) {
                 if (first.properties.size() != second.properties.size()) {
-                    return false;
+                    return Alternatives{};
                 }
-                for (size_t i = 0; i < first.properties.size(); ++i) {
-                    if (first.properties[i].first !=
-                            second.properties[i].first ||
-                        !tryMatch(
-                            blockArgs, args, first.properties[i].second,
-                            second.properties[i].second
-                        )) {
-                        return false;
+                Alternatives set{{InferenceSet{}}};
+                for (auto&& [l, r] : views::zip(first.properties, second.properties)) {
+                    if (l.first != r.first) {
+                        return Alternatives{};
                     }
+                    set = std::move(set) & tryMatch(l.second, r.second);
                 }
-                return true;
+                return set;
             },
             [&](type::Tuple const& first, type::Tuple const& second) {
                 if (first.fields.size() != second.fields.size()) {
-                    return false;
+                    return Alternatives{};
                 }
-                for (size_t i = 0; i < first.fields.size(); ++i) {
-                    if (!tryMatch(
-                            blockArgs, args, first.fields[i], second.fields[i]
-                        )) {
-                        return false;
+                Alternatives set{{InferenceSet{}}};
+                for (auto&& [l, r] : views::zip(first.fields, second.fields)) {
+                    set = std::move(set) & tryMatch(l, r);
+                }
+                return set;
+            },
+            [&](type::Variant const& first, type::Variant const& second) {
+                if (first.variants.size() != second.variants.size()) {
+                    return Alternatives{};
+                }
+                Alternatives set{{InferenceSet{}}};
+                for (auto&& [l, r] : views::zip(first.variants, second.variants)) {
+                    if (l.first != r.first) {
+                        return Alternatives{};
                     }
+                    set = std::move(set) & tryMatch(l.second, r.second);
                 }
-                return true;
+                return set;
+            },
+            [&](type::Union const& first, type::Union const& second) {
+                if (first.elements.size() != second.elements.size()) {
+                    return Alternatives{};
+                }
+                type::Union perm{second};
+                Alternatives finalSet{};
+                do {
+                    Alternatives set{{InferenceSet{}}};
+                    for (auto&& [l, r] : views::zip(first.elements, perm.elements)) {
+                        set = std::move(set) & tryMatch(l, r);
+                    }
+                    finalSet = std::move(finalSet) | std::move(set);
+                } while (ranges::next_permutation(perm.elements));
+                return finalSet;
             },
         },
         first, second
@@ -268,9 +352,26 @@ struct Intersect {
                 ranges::to<std::vector>()};
         }
 
+        Type operator()(type::Union const& type) {
+            return type::Union{
+                type.elements | views::transform(*this) |
+                ranges::to<std::vector>()};
+        }
+
         Type operator()(type::Struct const& type) {
             return type::Struct{
                 type.properties |
+                views::transform(
+                    [this](auto const& prop) -> std::pair<std::string, Type> {
+                        return {prop.first, (*this)(prop.second)};
+                    }
+                ) |
+                ranges::to<std::vector>()};
+        }
+
+        Type operator()(type::Variant const& type) {
+            return type::Variant{
+                type.variants |
                 views::transform(
                     [this](auto const& prop) -> std::pair<std::string, Type> {
                         return {prop.first, (*this)(prop.second)};
@@ -317,6 +418,23 @@ struct Intersect {
         Type operator()(type::Struct const& type) {
             return type::Struct{
                 type.properties |
+                views::transform(
+                    [this](auto const& prop) -> std::pair<std::string, Type> {
+                        return {prop.first, (*this)(prop.second)};
+                    }
+                ) |
+                ranges::to<std::vector>()};
+        }
+
+        Type operator()(type::Union const& type) {
+            return type::Union{
+                type.elements | views::transform(*this) |
+                ranges::to<std::vector>()};
+        }
+
+        Type operator()(type::Variant const& type) {
+            return type::Variant{
+                type.variants |
                 views::transform(
                     [this](auto const& prop) -> std::pair<std::string, Type> {
                         return {prop.first, (*this)(prop.second)};
@@ -548,25 +666,26 @@ struct ImplementationScope {
             return {};
         }
 
-        std::vector<std::optional<Type>> inferredTypeArguments{};
-        std::vector<std::optional<Type>> dummy{};
-        inferredTypeArguments.resize(implemetation.typeParameterNames.size());
 
+        Alternatives inference{{InferenceSet{}}};
         for (size_t i = 0; i < implemetation.trait.typeArguments.size(); ++i) {
-            if (!tryMatch(
-                    inferredTypeArguments, dummy,
+            inference = std::move(inference) & tryMatch(
                     implemetation.trait.typeArguments[i], trait.typeArguments[i]
-                )) {
+                );
+            if (inference.inner.size() == 0) {
                 return {};
             }
         }
 
-        if (!tryMatch(inferredTypeArguments, dummy, implemetation.type, type)) {
+            inference = std::move(inference) & tryMatch(
+                    implemetation.type, type
+                );
+        if (inference.inner.size() == 0) {
             return {};
         }
 
         std::vector<Type> typeArguments{};
-        for (auto& type : inferredTypeArguments) {
+        for (auto& type : inference.inner[0].block) {
             typeArguments.push_back(*type);
         }
 
@@ -579,7 +698,6 @@ struct ImplementationScope {
         ImplementationNode const& node, Type const& type, Trait const& trait
     ) {
         if (auto found = matches(*node.impl, trait, type)) {
-            std::cout << "impl found" << type << std::endl;
             for (auto child : node.children) {
                 if (auto moreSpecialized = tryFindIn(child, type, trait)) {
                     return moreSpecialized;
@@ -625,28 +743,25 @@ struct ImplementationScope {
                                    Type const& type,
                                    Trait const& trait) -> bool {
             if (impl->trait.declaration != trait.declaration) {
-                std::cout << "no cuz name" << std::endl;
                 return false;
             }
 
-            std::vector<std::optional<Type>> inferredTypeArguments{};
-            std::vector<std::optional<Type>> dummy{};
-            inferredTypeArguments.resize(s);
-
+            Alternatives inference{{InferenceSet{}}};
             for (size_t i = 0; i < impl->trait.typeArguments.size(); ++i) {
-                if (!tryMatch(
-                        inferredTypeArguments, dummy, trait.typeArguments[i],
-                        impl->trait.typeArguments[i]
-                    )) {
-                    std::cout << "no cuz trait args" << std::endl;
+                inference = std::move(inference) & tryMatch(
+                            trait.typeArguments[i],
+                            impl->trait.typeArguments[i]
+                        );
+                if (inference.inner.size() == 0) {
                     return false;
                 }
             }
 
-            if (!tryMatch(inferredTypeArguments, dummy, type, impl->type)) {
-                std::cout << "no cuz type" << std::endl;
+            inference = std::move(inference) & tryMatch(type, impl->type);
+            if (inference.inner.size() == 0) {
                 return false;
             }
+
             return true;
         };
         auto isNotSatisfiable = [&](std::pair<Type, Trait> const& bound
@@ -659,32 +774,19 @@ struct ImplementationScope {
                 }
             };
 
-            std::cout << "not satisfiable: " << bound.first << " is "
-                      << bound.second.declaration->name.value << std::endl;
             return true;
         };
         if (ranges::any_of(left, isNotSatisfiable) ||
             ranges::any_of(right, isNotSatisfiable)) {
             std::vector<size_t> ttt{};
-            std::cout << "not satisfiable " << left.size() << ' '
-                      << right.size() << std::endl;
-            std::cout << "said bounds "
-                      << ranges::any_of(ttt, [](size_t i) { return true; })
-                      << std::endl;
             return ImplSpan::Disjoint;
         }
-        std::cout << "satisfiable " << left.size() << ' ' << right.size()
-                  << std::endl;
         auto lInR =
             ranges::all_of(left, [&](std::pair<Type, Trait> const& bound) {
-                std::cout << bound.first << " is "
-                          << bound.second.declaration->name.value << std::endl;
                 return ranges::find(right, bound) != right.end();
             });
         auto rInL =
             ranges::all_of(right, [&](std::pair<Type, Trait> const& bound) {
-                std::cout << bound.first << " is "
-                          << bound.second.declaration->name.value << std::endl;
                 return ranges::find(left, bound) != left.end();
             });
         if (lInR && rInL)
@@ -693,7 +795,6 @@ struct ImplementationScope {
             return ImplSpan::Greater;
         if (rInL)
             return ImplSpan::Lesser;
-        std::cout << "bounds overlapping" << std::endl;
         return ImplSpan::Overlapping;
     }
 
@@ -704,7 +805,6 @@ struct ImplementationScope {
         is.intersect(impl->type, other->type);
         is.intersect(impl->trait, other->trait);
         if (!is.ok) {
-            std::cout << "said structure" << std::endl;
             return ImplSpan::Disjoint;
         }
 
@@ -720,7 +820,6 @@ struct ImplementationScope {
         bool lMore = is.leftIsMoreSpecialized();
         bool rMore = is.rightIsMoreSpecialized();
 
-        std::cout << "structural compare " << rMore << lMore << std::endl;
         if (lMore && rMore)
             return boundCmp;
         
@@ -746,7 +845,6 @@ struct ImplementationScope {
         std::vector<ImplementationNode>& nodes, ast::TraitImplementation* impl
     ) {
         std::vector<logs::SpannedMessage> errors{};
-        std::cout << "append to..." << std::endl;
         ImplementationNode node{impl, {}};
         auto current = nodes.begin();
         auto end = nodes.end();
@@ -925,7 +1023,6 @@ struct VariableScope : std::vector<std::pair<size_t, std::unordered_map<std::str
     }
 
     void exit(size_t controlFlowDepth) {
-        std::cout << "hmm - " << size() << std::endl;
         for (auto [_, index] : back().second) {
             if (bindings[index].lastUse.controlFlowDepth == controlFlowDepth &&
                 bindings[index].lastUse.usee) {
@@ -951,31 +1048,6 @@ std::string_view moduleName(std::string_view name) {
     auto slash = std::ranges::find(name, ':');
     return {name.begin(), slash};
 }
-
-// std::string findOwner(std::vector<Module*>& modules,
-// ast::FunctionDeclaration* declaration) {
-//     for (auto& mod : modules) {
-//         auto ptr = mod->program.functions.data();
-//         if (ptr <= declaration &&
-//             declaration < (ptr + mod->program.functions.size())) {
-//             return mod->moduleId;
-//         }
-//     }
-//     std::cout << "no owner" << std::endl;
-//     throw "";
-// }
-
-// std::string findOwner(ast::TypeDeclaration* declaration) {
-//     for (auto& mod : modules) {
-//         auto ptr = mod->program.typeDeclarations.data();
-//         if (ptr <= declaration &&
-//             declaration < (ptr + mod->program.typeDeclarations.size())) {
-//             return mod->moduleId;
-//         }
-//     }
-//     std::cout << "no owner" << std::endl;
-//     throw "";
-// }
 
 Type operator||(std::optional<Type> type, Type other) {
     if (type)
@@ -1038,7 +1110,7 @@ struct TypeChecker {
         TypeChecker& tc;
         ast::PropertyAccess& access;
 
-        Type operator()(type::Struct const& structure) {
+        std::variant<Type, type::Struct, type::Named, type::Never> operator()(type::Struct const& structure) {
             auto prop = std::find_if(
                 structure.properties.begin(), structure.properties.end(),
                 [&](auto& field) {
@@ -1046,66 +1118,92 @@ struct TypeChecker {
                 }
             );
             if (prop == structure.properties.end()) {
-                tc.logError(
-                    access.property.span, "error",
-                    "property {} does not exist on type {}",
-                    access.property.value, Type{type::Struct{structure}}
-                );
-                return type::Never{};
+                return type::Struct{structure};
             }
 
             size_t index = std::distance(structure.properties.begin(), prop);
             access.propertyIdx = index;
             return Type{structure.properties[index].second};
         }
-        Type operator()(type::Named const& named) {
+        std::variant<Type, type::Struct, type::Named, type::Never> operator()(type::Named const& named) {
             if (!tc.isVisible(
                     named.declaration, named.declaration->protoVisibility
                 )) {
-                tc.logError(
-                    spanOf(*access.lhs), "error",
-                    "prototype of {} is not accessible",
-                    Type{type::Named{named}}
-                );
-                return type::Never{};
+                    return named;
             }
-            std::cout << "PROTOVis " << (named.declaration->protoVisibility.level == ast::Visibility::Level::Public) << " of " <<  named.declaration->name.value << std::endl;
+            Type proto = with(named.typeArguments, {}, named.declaration->proto);
             if (access.property.value == "proto") {
                 access.propertyIdx = 0;
-                return with(named.typeArguments, {}, named.declaration->proto);
+                return proto;
             }
             access.namedDepth += 1;
-            return std::visit(
-                *this, with(named.typeArguments, {}, named.declaration->proto)
+            auto currentDepth = access.namedDepth;
+            auto result = std::visit(
+                *this, proto
             );
+
+            if (!std::holds_alternative<Type>(result)) {
+                access.namedDepth = currentDepth;
+                for (auto& promotion : named.promotions) {
+                    auto prop = ranges::find(std::get<type::Struct>(proto).properties, promotion, &std::pair<std::string, Type>::first);
+                    result = std::visit(
+                        *this, with(named.typeArguments, {}, prop->second)
+                    );
+                    if (std::holds_alternative<Type>(result)) {
+                        break;
+                    }
+                }
+            }
+            if (!std::holds_alternative<Type>(result)) {
+                access.namedDepth = currentDepth;
+            }
+            return result;
         }
 
-        Type operator()(type::Never const& never) {
+        std::variant<Type, type::Struct, type::Named, type::Never> operator()(type::Never const& never) {
+            return Type{type::Never{}};
+        }
+
+        std::variant<Type, type::Struct, type::Named, type::Never> operator()(auto const&) {
             return type::Never{};
         }
 
-        Type operator()(auto const&) {
-            tc.logError(spanOf(*access.lhs), "error", "not a struct type");
-            return type::Never{};
+        Type on(Type const& target) {
+            auto result = std::visit(*this, target);
+            return std::visit(match{
+                [&](type::Named&& found) { 
+                    tc.logError(
+                        spanOf(*access.lhs), "error",
+                        "prototype of {} is not accessible",
+                        Type{std::move(found)}
+                    );
+                    return Type{type::Never{}}; 
+                },
+                [&](type::Struct&& found) { 
+                    tc.logError(
+                        access.property.span, "error",
+                        "property {} does not exist on type {}",
+                        access.property.value, Type{std::move(found)}
+                    );
+                    return Type{type::Never{}}; 
+                },
+                [&](type::Never&& found) { 
+                    tc.logError(spanOf(*access.lhs), "error", "not a struct type");
+                    return Type{type::Never{}}; 
+                },
+                [&](Type&& found) { return found; },
+            }, std::move(result));
         }
+
     };
 
     std::optional<std::string> prepend(ast::Path const& path) {
         auto mod = currentModule;
-        std::cout << "looking in " << mod->moduleId << mod->imports.size()
-                  << std::endl;
         auto last = --path.segments.end();
         auto first = path.segments.begin();
         while (first != last) {
             auto import = mod->imports.find(first->value);
             if (import == mod->imports.end()) {
-                std::cout << "looking failed in " << mod->moduleId
-                          << mod->imports.size() << std::endl;
-                for (auto md : *modules) {
-                    for (auto& [name, _] : md->imports) {
-                        std::cout << "available " << name << std::endl;
-                    }
-                }
                 logError(
                     first->span, "error", "module {} not found", first->value
                 );
@@ -1286,6 +1384,31 @@ struct TypeChecker {
         }
         std::ranges::sort(fieldTypes, {}, &std::pair<std::string, Type>::first);
         return type::Struct{std::move(fieldTypes)};
+    }
+
+    std::optional<type::Union> resolve(ast::UnionType& _union) {
+        std::vector<Type> fieldTypes{};
+        for (auto& fieldType : _union.elements) {
+            if (auto type = resolve(fieldType)) {
+                fieldTypes.push_back(std::move(*type));
+            } else {
+                return {};
+            }
+        }
+        return type::Union{std::move(fieldTypes)};
+    }
+
+    std::optional<type::Variant> resolve(ast::VariantType& variant) {
+        std::vector<std::pair<std::string, Type>> fieldTypes{};
+        for (auto& property : variant.variants) {
+            if (auto type = property.typeName ? resolve(*property.typeName) : Type{&type::null}) {
+                fieldTypes.push_back({std::move(property.name), *type});
+            } else {
+                return {};
+            }
+        }
+        std::ranges::sort(fieldTypes, {}, &std::pair<std::string, Type>::first);
+        return type::Variant{std::move(fieldTypes)};
     }
 
     std::optional<Type> resolve(ast::VectorType& vector) {
@@ -1689,12 +1812,10 @@ struct TypeChecker {
             );
         }
 
-        std::cout << binary.rhs.get() << std::endl;
         std::vector<ast::Expression> args{};
         args.push_back(std::move(*binary.rhs));
         auto ref = TraitMethodRef{
             Trait{traitScope[std::string{traitName->second}], {Type{rhsType}}}};
-        std::cout << binary.lhs.get() << std::endl;
         // struct PropertyAccess {
         //     Span span;
         //     UPtr<Expression> lhs;
@@ -1713,18 +1834,22 @@ struct TypeChecker {
             Span{}, std::move(expr), {}, {std::move(args)}, {std::move(ref)},
         };
 
-        fmt::println("lets check call");
         auto resolvedReturnType = checkCall(
             traitScope[std::string{traitName->second}]->signatures[0], call,
             {rhsType, lhsType}, {}
         );
-        fmt::println("done with check call");
         call.type = resolvedReturnType;
         return {std::move(call), std::move(resolvedReturnType)};
     }
 
     std::pair<ast::Expression, Type>
     subsituteOverloadedOperator(ast::Binary<"=">&& expression) {
+        auto type = (*this)(expression);
+        return {std::move(expression), type};
+    }
+
+    std::pair<ast::Expression, Type>
+    subsituteOverloadedOperator(ast::Binary<"+=">&& expression) {
         auto type = (*this)(expression);
         return {std::move(expression), type};
     }
@@ -1931,6 +2056,7 @@ struct TypeChecker {
     std::pair<ast::Expression, Type> operator()(ast::Cast&& cast) {
         auto lhs = (*this)(*cast.lhs);
         auto target = resolve(cast.typeName);
+        cast.type = *target;
         if (!target) return {std::move(cast), type::Never{}};
         if (lhs == *target) {
             // logError(
@@ -1953,6 +2079,19 @@ struct TypeChecker {
                 "type {} cannot be cast to type {}", lhs, *target
             );
             return {std::move(cast), type::Never{}};
+        }
+
+        type::Union* _union = std::get_if<type::Union>(&*target);
+        if (_union != nullptr && ranges::find(_union->elements, lhs) != _union->elements.end()) {
+            return {std::move(cast), *target};
+        }
+
+        type::Variant* targetVariant = std::get_if<type::Variant>(&*target);
+        type::Variant* actualVariant = std::get_if<type::Variant>(&lhs);
+        if (targetVariant != nullptr && actualVariant != nullptr && ranges::all_of(actualVariant->variants, [&](auto const& var) {
+            return ranges::find(targetVariant->variants, var) != targetVariant->variants.end();
+        })) {
+            return {std::move(cast), *target};
         }
 
         if (!implementationScope.areSatisfied(
@@ -2228,7 +2367,7 @@ struct TypeChecker {
     Type tryWriteTo(ast::PropertyAccess& access) {
         Type lhsType = tryWriteTo(*access.lhs);
         access.namedDepth = 0;
-        return std::visit(FieldAccessor{*this, access}, lhsType);
+        return FieldAccessor{*this, access}.on(lhsType);
     }
 
     Type tryWriteTo(ast::TupleFieldAccess& access) {
@@ -2299,15 +2438,34 @@ struct TypeChecker {
 
     Type operator()(ast::Binary<"=">& assignment) {
         Type rhsType = (*this)(*assignment.rhs);
-        Type lhsType = (*this)(*assignment.lhs);
-        tryWriteTo(*assignment.lhs);
-        if (lhsType != rhsType && !isNever(lhsType) && !isNever(rhsType)) {
+        Type lhsType = tryWriteTo(*assignment.lhs);
+        assignment.type = lhsType;
+        if (!coerce(lhsType, *assignment.rhs, rhsType) && !isNever(lhsType) && !isNever(rhsType)) {
             logError(
                 assignment.span, "invalid assignment",
                 "type {} is not assignable to {}", lhsType, rhsType
             );
         }
-        return std::move(lhsType);
+        return std::move(rhsType);
+    }
+
+    Type operator()(ast::Binary<"+=">& assignment) {
+        Type rhsType = (*this)(*assignment.rhs);
+        Type lhsType = tryWriteTo(*assignment.lhs);
+        assignment.type = lhsType;
+        if (!coerce(lhsType, *assignment.rhs, rhsType) && !isNever(lhsType) && !isNever(rhsType)) {
+            logError(
+                assignment.span, "invalid assignment",
+                "type {} is not assignable to {}", lhsType, rhsType
+            );
+        }
+        if (lhsType != &type::integer || lhsType != &type::floating) {
+            logError(
+                assignment.span, "invalid arguments",
+                "operator += only takes integers or floats as operands"
+            );
+        }
+        return std::move(rhsType);
     }
 
     std::pair<ast::Expression, Type>
@@ -2335,7 +2493,6 @@ struct TypeChecker {
     }
 
     Type operator()(ast::Variable& variable) {
-        std::cout << "ENTER var" << std::endl;
         if (variable.name.segments.size() > 1) {
             logError(
                 variable.span, "error",
@@ -2344,10 +2501,7 @@ struct TypeChecker {
             return type::Never{};
         }
         if (variable.name.str() == "") {
-            std::cout << "'SVAR " << variable.binding << " "
-                      << scope.bindings.size() << std::endl;
             Type t = scope[variable.binding].type;
-            std::cout << "sss" << std::endl;
             return t;
         }
 
@@ -2371,16 +2525,12 @@ struct TypeChecker {
             return type::Never{};
         }
         variable.binding = *binding;
-        fmt::println("foundee {} {}", variable.binding, scope.bindings.size());
         auto& bind = scope[variable.binding];
-        fmt::println("found {}", variable.name);
-        std::cout << bind.type << std::endl;
         bind.lastUse = {&variable, controlFlowDepth};
         return bind.type;
     };
 
     Type operator()(ast::Block& block) {
-        fmt::println("BLOKK {}", block);
         scope.enter();
         Type type = Type{builtInTypes["null"]};
         for (auto& blockItem : block.items) {
@@ -2448,6 +2598,43 @@ struct TypeChecker {
         return type;
     }
 
+    Type operator()(ast::VariantLiteral& variant) {
+        Type valueType = variant.value ? (*this)(*variant.value) : Type{&type::null};
+        Type literalType{type::Variant{{{variant.variant.value, valueType}}}};
+
+        if (!variant.name) {
+            return literalType;
+        }
+
+        auto named = resolve(variant.name.value());
+        if (!named) {
+            return type::Never{};
+        }
+        type::Named type = std::get<type::Named>(*named);
+
+        type::Variant* variantProto = std::get_if<type::Variant>(&type.declaration->proto);
+        if (!variantProto) {
+            logError(
+                variant.span, "error",
+                "prototype of type {} is not a variant type", *named,
+                *named
+            );
+            return *named;
+        }
+
+        if (ranges::find(variantProto->variants, std::pair{variant.variant.value, valueType}) == variantProto->variants.end()) {
+            logError(
+                variant.span, "error",
+                "variant {} does not exist in type {}", variant.variant.value,
+                type.declaration->proto
+            );
+            return *named;
+        }
+
+        variant.namedType = type;
+        return type;
+    }
+
     Type protoOf(type::Named const& named) {
         return with(named.typeArguments, {}, named.declaration->proto);
     }
@@ -2458,7 +2645,6 @@ struct TypeChecker {
         bool isMutable;
 
         void operator()(ast::Pattern& pattern, Type const& type) {
-                        std::cout << "checking PATT" << type << std::endl;
             check.scope.matchMutable = isMutable;
             (*this)(pattern.body, type);
             if (pattern.guard) {
@@ -2491,13 +2677,10 @@ struct TypeChecker {
                         );
                     },
                     [&](ast::Expression& expression) {
-                        std::cout << "GSETEEE " << type << std::endl;
                         check.scope.matchedField = type;
                         check.scope.matchedFieldWasAnonymous = false;
                         Type expressionType = check(expression);
-                        std::cout << "LETSAGO" << type << std::endl;
                         if (!check.scope.matchedField) {
-                            std::cout << "GSET " << type << std::endl;
                             check.scope.bindings.back().type = type;
                             check.scope.bindings.back().isMutable = isMutable;
                             body.anonymous =
@@ -2523,9 +2706,7 @@ struct TypeChecker {
                             }
                             body.anonymous = true;
                             check.scope.enter();
-                            std::cout << "G " << std::endl;
                             check.scope.add("", type, false);
-                            std::cout << "G" << std::endl;
                             check.scope.matchedField.reset();
                             auto [newExpr, _] =
                                 check.subsituteOverloadedOperator(
@@ -2537,7 +2718,6 @@ struct TypeChecker {
                                             check.scope.bindings.size() - 1}}}
                                 );
                             expression = std::move(newExpr);
-                            std::cout << "G" << std::endl;
                             check.scope.exit(check.controlFlowDepth);
                         }
                     },
@@ -2586,6 +2766,33 @@ struct TypeChecker {
             tuple.type = tupleType;
         }
 
+        void operator()(ast::DestructureUnion& _union, Type const& unionType) {
+            _union.type = check.resolve(_union.name) || type::Never{};
+            
+            type::Union const* type;
+            if (auto asUnion = std::get_if<type::Union>(&unionType)) {
+                type = asUnion;
+            } else if (auto asNamed = std::get_if<type::Named>(&unionType)) {
+                type = std::get_if<type::Union>(&asNamed->declaration->proto);;
+            }
+            if (!type && !isNever(unionType)) {
+                check.logError(
+                    _union.span, "error", "type {} is not a union", unionType
+                );
+                return;
+            }
+
+            if (!isNever(unionType) &&
+                ranges::find(type->elements, _union.type) == type->elements.end()) {
+                check.logError(
+                    _union.span, "error", "union {} does not contain type {}",
+                    unionType, _union.type
+                );
+            }
+            Type never{type::Never{}};
+            (*this)(*_union.fields, _union.type);
+        }
+
         void
         operator()(ast::DestructureVector& vector, Type const& vectorType) {
             if (!allowGuards) {
@@ -2612,8 +2819,6 @@ struct TypeChecker {
                 std::visit(
                     match{
                         [&](ast::Pattern& pattern) {
-                            std::cout << "PTYPE " << vector.elementType
-                                      << std::endl;
                             (*this)(pattern, vector.elementType);
                         },
                         [&](ast::RestElements& rest) {
@@ -2672,6 +2877,45 @@ struct TypeChecker {
 
             for (auto& property : structure.properties) {
                 (*this)(property, *type);
+            }
+            structure.type = structureType;
+        }
+
+        void operator()(
+            ast::DestructureVariant& structure, Type const& structureType
+        ) {
+            type::Variant const* type;
+            if (auto asVariant = std::get_if<type::Variant>(&structureType)) {
+                type = asVariant;
+            } else if (auto asNamed = std::get_if<type::Named>(&structureType)) {
+                type = std::get_if<type::Variant>(&asNamed->declaration->proto);;
+            }
+
+            if (isNever(structureType)) {
+                structure.type = structureType;
+                return;
+            }
+
+            if (!type) {
+                check.logError(
+                    structure.span, "error", "{} is not a variant type", structureType
+                );
+                return;
+            }
+
+            auto prop = ranges::find(type->variants, structure.name.value, &std::pair<std::string, Type>::first);
+            if (prop == type->variants.end()) {
+                check.logError(
+                    structure.span, "error", "type {} has no variant named {}",
+                    structureType, structure.name.value
+                );
+                return;
+            }
+
+            if (structure.pattern) {
+                (*this)(*structure.pattern, prop->second);
+            } else {
+                check.scope.add(prop->first, prop->second, isMutable);
             }
             structure.type = structureType;
         }
@@ -2751,7 +2995,6 @@ struct TypeChecker {
     }
 
     Type operator()(ast::VarBinding& var) {
-        std::cout << "VAR BEGIN" << std::endl;
         Type type = (*this)(var.initalValue);
         if (var.typeName) {
             auto expected = resolve(var.typeName.value());
@@ -2765,7 +3008,6 @@ struct TypeChecker {
             return Type{builtInTypes["null"]};
         }
         CheckPattern{*this, false, true}(var.binding, type);
-        std::cout << "VAR END" << std::endl;
         return Type{builtInTypes["null"]};
     }
 
@@ -2779,6 +3021,37 @@ struct TypeChecker {
             },
             condition.value
         );
+    }
+
+    bool coerce(Type const& type, ast::Expression& node) {
+        Type actual = (*this)(node);
+        return coerce(type, node, actual);
+    }
+
+    bool coerce(Type const& type, ast::Expression& node, Type const& actual) {
+        if (!actual.isAssignableTo(type)) {
+            type::Union const* _union = std::get_if<type::Union>(&type);
+            if (_union && ranges::find(_union->elements, type) != _union->elements.end()) {
+                node = ast::Cast{spanOf(node), std::move(node), {}, Type{type}};
+                return true;
+            }
+
+            type::Union const* actualUnion = std::get_if<type::Union>(&actual);
+            if (_union && actualUnion && ranges::all_of(actualUnion->elements, [&](Type const& elem) { return ranges::find(_union->elements, elem) != _union->elements.end();})) {
+                node = ast::Cast{spanOf(node), std::move(node), {}, Type{type}};
+                return true;
+            }
+
+            type::Variant const* _variant = std::get_if<type::Variant>(&type);
+            type::Variant const* actualVariant = std::get_if<type::Variant>(&actual);
+            if (_variant && actualVariant && ranges::all_of(actualVariant->variants, [&](std::pair<std::string, Type> const& elem) { return ranges::find(_variant->variants, elem) != _variant->variants.end();})) {
+                node = ast::Cast{spanOf(node), std::move(node), {}, Type{type}};
+                return true;
+            }
+
+            return false;
+        }
+        return true;
     }
 
     void expect(Span span, Type const& type, auto& node) {
@@ -2800,7 +3073,7 @@ struct TypeChecker {
         auto trueType = (*this)(*ifExpr.trueBranch);
         mergeBranchTypes(result, trueType);
         if (ifExpr.falseBranch) {
-            mergeBranchTypes(result, (*this)(**ifExpr.falseBranch));
+            mergeBranchTypes(result, (*this)(*ifExpr.falseBranch));
         } else {
             mergeBranchTypes(result, &type::null);
         }
@@ -2862,8 +3135,6 @@ struct TypeChecker {
         std::vector<Type> const& blockTypeArguments,
         std::vector<Type> const& typeArguments
     ) {
-        std::cout << "checking..." << std::endl;
-
         if (call.argValues.size() != function.parameters.size()) {
             logError(
                 function.span, "invalid parameter count",
@@ -2872,7 +3143,6 @@ struct TypeChecker {
             );
         }
 
-        std::cout << "checking...2" << std::endl;
         if (typeArguments.size() !=
             function.typeParameterNames.size()) {
             logError(
@@ -2882,11 +3152,8 @@ struct TypeChecker {
                 call.typeArgumentNames.size()
             );
         }
-        std::cout << "checking..3" << std::endl;
-
         auto withres =
             with(blockTypeArguments, typeArguments, function.traitBounds);
-        std::cout << "checking..4" << std::endl;
 
         for (size_t i :
              implementationScope.areSatisfiedAll(std::move(withres))) {
@@ -2896,34 +3163,31 @@ struct TypeChecker {
                 withres[i].second
             );
         }
-        std::cout << "checking..5 " << blockTypeArguments.size() << typeArguments.size() << std::endl;
-
         return Type{
             with(blockTypeArguments, typeArguments, function.returnType)};
     }
 
     struct Inferer {
         TypeChecker& tc;
-        std::vector<std::optional<Type>> blockTypeArgs{};
-        std::vector<std::optional<Type>> funTypeArgs{};
         std::vector<ast::TypeParameter>* blockTypeParamNames;
         std::vector<ast::TypeParameter>* funTypeParamNames;
+        Span inferenceSpan;
+        Alternatives parameters{{InferenceSet{}}};
 
         void presetBlock(std::vector<Type> const& args) {
             for (size_t i = 0; i < args.size(); ++i) {
-                blockTypeArgs[i] = args[i];
+                parameters.inner[0].block[i] = args[i];
             }
         }
         void presetFun(std::vector<Type> const& args) {
             for (size_t i = 0; i < args.size(); ++i) {
-                funTypeArgs[i] = args[i];
+                parameters.inner[0].local[i] = args[i];
             }
         }
 
         bool match(Type const& first, Type const& second) {
-            bool m = tryMatch(blockTypeArgs, funTypeArgs, first, second);
-            std::cout << "done match " << std::endl;
-            return m;
+            parameters = std::move(parameters) & tryMatch(first, second);
+            return parameters.inner.size() != 0;
         }
 
         void checkArgs(
@@ -2950,24 +3214,42 @@ struct TypeChecker {
         }
 
         std::pair<std::vector<Type>, std::vector<Type>> get() {
+            if (parameters.inner.size() == 0) {
+                std::cout << "invalid type" << std::endl;
+                throw "";
+            }
+
+            if (parameters.inner.size() > 1) {
+                std::cout << "ambiguous match" << std::endl;
+                throw "";
+            }
+
             std::vector<Type> blockTArgs{};
-            for (auto&& [i, arg] : blockTypeArgs | views::enumerate) {
+            for (auto&& [i, arg] : parameters.inner[0].block | views::enumerate) {
                 if (!arg) {
                     tc.logError(
-                        (*blockTypeParamNames)[i].span, "error",
+                        inferenceSpan, "error",
                         "could not infer type for type parameter {}",
                         (*blockTypeParamNames)[i].name
+                    );
+                    tc.logInfo(
+                        (*blockTypeParamNames)[i].span, "note",
+                        "type parameter declared here"
                     );
                 }
                 blockTArgs.push_back(arg || type::Never{});
             }
             std::vector<Type> funTArgs{};
-            for (auto&& [i, arg] : funTypeArgs | views::enumerate) {
+            for (auto&& [i, arg] : parameters.inner[0].local | views::enumerate) {
                 if (!arg) {
                     tc.logError(
-                        (*funTypeParamNames)[i].span, "error",
+                        inferenceSpan, "error",
                         "could not infer type for type parameter {}",
                         (*funTypeParamNames)[i].name
+                    );
+                    tc.logInfo(
+                        (*funTypeParamNames)[i].span, "note",
+                        "type parameter declared here"
                     );
                 }
                 funTArgs.push_back(arg || type::Never{});
@@ -3017,7 +3299,6 @@ struct TypeChecker {
                     for (auto& arg : call.argValues) {
                         argTypes.push_back((*this)(arg));
                     }
-                    std::cout << "processing function call... " << std::endl;
                     auto name = prepend(variable.name);
                     if (!name)
                         return type::Never{};
@@ -3071,9 +3352,7 @@ struct TypeChecker {
                                 );
                                 return constructedType;
                             }
-                            std::cout << "get the proto " << std::endl;
                             auto proto = protoOf(constructedType);
-                            std::cout << "get the proto2 " << std::endl;
                             if (!argTypes[0].isAssignableTo(proto)) {
                                 logError(
                                     call.span, "invalid initialization",
@@ -3083,9 +3362,7 @@ struct TypeChecker {
                                     Type{type::Named{constructedType}}
                                 );
                             }
-                            std::cout << "get the prot3 " << std::endl;
                             call.target = type::Named{constructedType};
-                            std::cout << "get the proto4 " << std::endl;
                             return std::move(Type{std::move(constructedType)});
                         }
                         if (tuple->fields.size() != call.argValues.size()) {
@@ -3121,41 +3398,30 @@ struct TypeChecker {
                         return type::Never{};
                     }
 
-                    std::cout << "found func" << std::endl;
-
                     Inferer inferer{
                         *this,
-                        {},
-                        {},
                         nullptr,
-                        &func->second->typeParameterNames};
-                    inferer.funTypeArgs.resize(
+                        &func->second->typeParameterNames, call.span};
+                    inferer.parameters.inner[0].local.resize(
                         func->second->typeParameterNames.size()
                     );
-                        std::cout << "will match1" << std::endl;
                     inferer.presetFun(typeArguments);
-                        std::cout << "will match2" << std::endl;
                     for (auto&& [param, arg] : views::zip(func->second->parameters, argTypes)) {
-                        std::cout << "will match" << std::endl;
                         inferer.match(
                             param.type, arg
                         );
                     }
 
                     auto [_, tArgs] = inferer.get();
-                    std::cout << "checking..15" << std::endl;
                     auto resolvedReturnType =
                         checkCall(*func->second, call, {}, tArgs);
-                    std::cout << "checking..0" << std::endl;
                     call.target = Function{
                         func->second,
                         std::move(tArgs),
                     };
-                    std::cout << "checking..7" << std::endl;
                     return std::move(resolvedReturnType);
                 },
                 [&](ast::PropertyAccess& method) -> Type {
-                    std::cout << "processing method call... " << std::endl;
                     Type lhsType = (*this)(*method.lhs);
                     std::vector<Type> argTypes{};
                     for (auto& arg : call.argValues) {
@@ -3164,8 +3430,6 @@ struct TypeChecker {
                     if (isNever(lhsType)) {
                         return type::Never{};
                     }
-                    std::cout << "got lhs " << std::endl;
-
                     // regular method
                     if (!method.traitName) {
                         for (auto impl : implScope) {
@@ -3173,53 +3437,74 @@ struct TypeChecker {
                                 if (!named->declaration) continue;
                             }
 
-                            Inferer inferer{
-                                *this, {}, {}, &impl->typeParameterNames, nullptr};
-                            inferer.blockTypeArgs.resize(
-                                impl->typeParameterNames.size()
-                            );
-                            std::cout << "gonna " << impl->type << std::endl;
-                            if (inferer.match(impl->type, lhsType)) {
-                                auto func = std::ranges::find_if(
-                                    impl->functions,
-                                    [&](ast::Signature& sig) {
-                                        return sig.name.value ==
-                                            method.property.value;
-                                    }
+                            auto tryInfer = [&](Type const& receiver) -> std::optional<Type> {
+                                Inferer inferer{
+                                    *this, &impl->typeParameterNames, nullptr, call.span};
+                                inferer.parameters.inner[0].block.resize(
+                                    impl->typeParameterNames.size()
                                 );
-                                if (func != impl->functions.end()) {
-                                    if (!isVisible(func)) {
-                                        logError(
-                                            call.span, "error",
-                                            "method {} is not accessible",
-                                            func->name
+                                if (inferer.match(impl->type, receiver)) {
+                                    auto func = std::ranges::find_if(
+                                        impl->functions,
+                                        [&](ast::Signature& sig) {
+                                            return sig.name.value ==
+                                                method.property.value;
+                                        }
+                                    );
+                                    if (func != impl->functions.end()) {
+                                        if (!isVisible(func)) {
+                                            logError(
+                                                call.span, "error",
+                                                "method {} is not accessible",
+                                                func->name
+                                            );
+                                            return type::Never{};
+                                        }
+                                        inferer.funTypeParamNames =
+                                            &func->typeParameterNames;
+                                        inferer.parameters.inner[0].local.resize(
+                                            func->typeParameterNames.size()
                                         );
-                                        return type::Never{};
-                                    }
-                                    inferer.funTypeParamNames =
-                                        &func->typeParameterNames;
-                                    inferer.funTypeArgs.resize(
-                                        func->typeParameterNames.size()
-                                    );
-                                    inferer.checkArgs(
-                                        *func, typeArguments, argTypes
-                                    );
+                                        inferer.checkArgs(
+                                            *func, typeArguments, argTypes
+                                        );
 
-                                    auto [blockTArgs, tArgs] = inferer.get();
-                                    if (func->isMutation) {
-                                        tryWriteTo(*method.lhs);
+                                        auto [blockTArgs, tArgs] = inferer.get();
+                                        if (func->isMutation) {
+                                            tryWriteTo(*method.lhs);
+                                        }
+                                        auto resolvedReturnType =
+                                            checkCall(*func, call, blockTArgs, tArgs);
+                                        method.propertyIdx = std::distance(
+                                            impl->functions.begin(), func
+                                        );
+                                        call.target = ImplRef{
+                                            impl,
+                                            blockTArgs,
+                                            tArgs,
+                                        };
+                                        return resolvedReturnType;
                                     }
-                                    auto resolvedReturnType =
-                                        checkCall(*func, call, blockTArgs, tArgs);
-                                    method.propertyIdx = std::distance(
-                                        impl->functions.begin(), func
-                                    );
-                                    call.target = ImplRef{
-                                        impl,
-                                        blockTArgs,
-                                        tArgs,
-                                    };
-                                    return resolvedReturnType;
+
+                                }
+                                return {};
+                            };
+
+                            auto result = tryInfer(lhsType);
+                            if (result) {
+                                return *result;
+                            }
+                            
+                            if (auto namedType = std::get_if<type::Named>(&lhsType)) {
+                                if (namedType->promotions.size() > 0) {
+                                    type::Struct structure = std::get<type::Struct>(with(namedType->typeArguments, {}, namedType->declaration->proto));
+                                    for (auto& promotion : namedType->promotions) {
+                                        auto prop = ranges::find(structure.properties, promotion, &std::pair<std::string, Type>::first);
+                                        result = tryInfer(prop->second);
+                                        if (result) {
+                                            return *result;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -3237,7 +3522,6 @@ struct TypeChecker {
                         }
                     }
 
-                    std::cout << "so trait methdod " << lhsType << std::endl;
                     // maybe it's a trait method
                     std::vector<std::pair<ast::TraitDeclaration*, size_t>>
                         candidates;
@@ -3276,8 +3560,6 @@ struct TypeChecker {
                         }
                     }
                     
-                    std::cout << "so trait methdod? " << candidates.size()
-                            << std::endl;
                     if (candidates.size() == 0) {
                         logError(
                             method.property.span, "undefined method",
@@ -3306,14 +3588,12 @@ struct TypeChecker {
                     auto idx = candidates[0].second;
                     Inferer inferer{
                         *this,
-                        {},
-                        {},
                         &traitDecl->typeParameterNames,
-                        &traitDecl->signatures[idx].typeParameterNames};
-                    inferer.blockTypeArgs.resize(
+                        &traitDecl->signatures[idx].typeParameterNames, call.span};
+                    inferer.parameters.inner[0].block.resize(
                         traitDecl->typeParameterNames.size()
                     );
-                    inferer.funTypeArgs.resize(
+                    inferer.parameters.inner[0].local.resize(
                         traitDecl->signatures[idx].typeParameterNames.size()
                     );
                     inferer.presetFun(typeArguments);
@@ -3366,7 +3646,7 @@ struct TypeChecker {
     Type operator()(ast::PropertyAccess& access) {
         auto type = (*this)(*access.lhs);
         access.namedDepth = 0;
-        return std::visit(FieldAccessor{*this, access}, type);
+        return FieldAccessor{*this, access}.on(type);
     }
 
     Type operator()(ast::TupleFieldAccess& access) {
@@ -3419,7 +3699,6 @@ struct TypeChecker {
         }
 
         impl.type = *targetType;
-        std::cout << "got impl type " << impl.type << std::endl;
         selfType = Type{impl.type};
 
         scope.enter();
@@ -3495,7 +3774,6 @@ struct TypeChecker {
         for (auto& mod : program) {
             currentModule = mod;
             for (auto& trait : mod->program.traitDeclarations) {
-                std::cout << "got " << trait.name.value << std::endl;
                 (*this)(trait);
             }
         }
@@ -3519,8 +3797,6 @@ struct TypeChecker {
         }
         for (auto& mod : program) {
             currentModule = mod;
-            std::cout << "setting mod to " << mod->moduleId
-                      << mod->imports.size() << std::endl;
             for (auto& function : mod->program.functions) {
                 (*this)(function);
             }

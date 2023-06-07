@@ -1,8 +1,7 @@
 #ifndef ICY_TYPES_H
 #define ICY_TYPES_H
 
-#define _ITERATOR_DEBUG_LEVEL 0
-
+#include <compare>
 #include "../utils.h"
 #include <fmt/format.h>
 #include <sstream>
@@ -70,11 +69,23 @@ static BuiltIn floating = BuiltIn{nullptr, "float"};
 
 struct Struct {
     std::vector<std::pair<std::string, Type>> properties;
+    std::strong_ordering operator<=>(Struct const& other) const;
     bool operator==(Struct const& other) const;
 };
 struct Tuple {
     std::vector<Type> fields;
+    std::strong_ordering operator<=>(Tuple const& other) const;
     bool operator==(Tuple const& other) const = default;
+};
+struct Union {
+    std::vector<Type> elements;
+    std::strong_ordering operator<=>(Union const& other) const;
+    bool operator==(Union const& other) const = default;
+};
+struct Variant {
+    std::vector<std::pair<std::string, Type>> variants;
+    std::strong_ordering operator<=>(Variant const& other) const;
+    bool operator==(Variant const& other) const;
 };
 // struct Vector {
 //     explicit Vector(Vector const&);
@@ -89,16 +100,20 @@ struct Tuple {
 struct Parameter {
     bool isBlockParameter;
     size_t index;
+    std::strong_ordering operator<=>(Parameter const& other) const = default;
     bool operator==(Parameter const& other) const = default;
 };
 
 struct Named {
     ast::TypeDeclaration* declaration;
     std::vector<Type> typeArguments;
+    std::vector<std::string> promotions;
+    std::strong_ordering operator<=>(Named const& other) const;
     bool operator==(Named const& other) const = default;
 };
 
 struct Never {
+    std::strong_ordering operator<=>(Never const& other) const = default;
     bool operator==(Never const&) const = default;
 };
 } // namespace type
@@ -111,7 +126,7 @@ struct Never {
 
 using TypeBase = std::variant<
     type::Named, type::BuiltIn*, type::Tuple, type::Struct, type::Parameter,
-    type::Never>;
+    type::Never, type::Union, type::Variant>;
 
 struct Type : TypeBase {
     template <VariantElement<TypeBase> T>
@@ -138,6 +153,7 @@ struct Type : TypeBase {
     constexpr Type() = default;
 
     bool operator==(Type const& other) const = default;
+    std::strong_ordering operator<=>(Type const& other) const;
     bool isAssignableTo(Type const& other) const;
 
     Type operator[](size_t index) const;

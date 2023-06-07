@@ -1,13 +1,20 @@
 #include "./types.h"
 #include "./ast.h"
+#include "types.h"
 
+#include <range/v3/all.hpp>
 #include <algorithm>
+#include <compare>
 #include <iostream>
+#include <variant>
 
 namespace type {
 // can't use default, clang literally crashes
 bool Struct::operator==(Struct const& other) const {
     return std::ranges::equal(properties, other.properties);
+};
+bool Variant::operator==(Variant const& other) const {
+    return std::ranges::equal(variants, other.variants);
 };
 } // namespace type
 
@@ -56,6 +63,22 @@ std::ostream& operator<<(std::ostream& stream, Type const& type) {
                        << first.index;
             },
             [&](type::Never const& first) { stream << "never"; },
+            [&](type::Variant const& first) {
+                stream << "{";
+                for (auto& [field, type] : first.variants)
+                    stream << field << ": " << type << "|";
+
+                stream << "}";
+            },
+            [&](type::Union const& first) {
+                stream << "(";
+                if (first.elements.size() == 0) stream << "|";
+
+                for (auto& type : first.elements)
+                    stream << type << "|";
+
+                stream << ")";
+            },
         },
         type
     );
@@ -135,6 +158,26 @@ Type with(
                 }
                 return Type{type::Struct{std::move(properties)}};
             },
+            [&](type::Union const& tuple) -> Type {
+                std::vector<Type> fields{};
+                for (auto& field : tuple.elements) {
+                    fields.push_back(
+                        with(blockTypeArguments, typeArguments, field)
+                    );
+                }
+                return Type{type::Union{std::move(fields)}};
+            },
+            [&](type::Variant const& structure) -> Type {
+                std::vector<std::pair<std::string, Type>> properties{};
+                for (auto& [name, property] : structure.variants) {
+                    properties.push_back(
+                        {name,
+                         Type{
+                             with(blockTypeArguments, typeArguments, property)}}
+                    );
+                }
+                return Type{type::Variant{std::move(properties)}};
+            },
             [&](type::Never const&) -> Type { return type::Never{}; },
         },
         type
@@ -173,12 +216,89 @@ std::vector<std::pair<Type, Trait>> with(
 ) {
     std::vector<std::pair<Type, Trait>> substituted{};
     for (auto& [type, trait] : traitBounds) {
-        std::cout << "trying type " << type << std::endl;
-        std::cout << "given" << blockTypeArguments.size() << std::endl;
         auto tp = with(blockTypeArguments, typeArguments, type);
-        std::cout << "trying trait" << std::endl;
         auto tr = with(blockTypeArguments, typeArguments, trait);
         substituted.push_back({std::move(tp), std::move(tr)});
     }
     return std::move(substituted);
+}
+
+std::strong_ordering Type::operator<=>(Type const& other) const {
+    return std::visit(match{
+        [&](auto const&, auto const&) {
+            if (index() > other.index()) {
+                return std::strong_ordering::greater;
+            }
+            return std::strong_ordering::less;
+        },
+        [&]<class T>(T const& a, T const& b) {
+            return a <=> b;
+        }
+    }, *this, other);
+}
+
+namespace type {
+    std::strong_ordering Named::operator<=>(Named const& other) const {
+        auto ord = other.declaration <=> declaration;
+        if (ord != std::strong_ordering::equal) return ord;
+        
+        for (auto&& [l, r] : ranges::views::zip(typeArguments, other.typeArguments)) {
+            auto ord = l <=> r;
+            if (ord != std::strong_ordering::equal) return ord;
+        }
+
+        return std::strong_ordering::equal;
+    }
+
+    std::strong_ordering Union::operator<=>(Union const& other) const {
+        auto ord = elements.size() <=> other.elements.size();
+        if (ord != std::strong_ordering::equal) return ord;
+
+        for (auto&& [l, r] : ranges::views::zip(elements, other.elements)) {
+            auto ord = l <=> r;
+            if (ord != std::strong_ordering::equal) return ord;
+        }
+
+        return std::strong_ordering::equal;
+    }
+
+    std::strong_ordering Tuple::operator<=>(Tuple const& other) const {
+        auto ord = fields.size() <=> other.fields.size();
+        if (ord != std::strong_ordering::equal) return ord;
+
+        for (auto&& [l, r] : ranges::views::zip(fields, other.fields)) {
+            auto ord = l <=> r;
+            if (ord != std::strong_ordering::equal) return ord;
+        }
+
+        return std::strong_ordering::equal;
+    }
+
+    std::strong_ordering Struct::operator<=>(Struct const& other) const {
+        auto ord = properties.size() <=> other.properties.size();
+        if (ord != std::strong_ordering::equal) return ord;
+
+        for (auto&& [l, r] : ranges::views::zip(properties, other.properties)) {
+            auto ord = l.first <=> r.first;
+            if (ord != std::strong_ordering::equal) return ord;
+            ord = l.second <=> r.second;
+            if (ord != std::strong_ordering::equal) return ord;
+        }
+
+        return std::strong_ordering::equal;
+    }
+
+    std::strong_ordering Variant::operator<=>(Variant const& other) const {
+        auto ord = variants.size() <=> other.variants.size();
+        if (ord != std::strong_ordering::equal) return ord;
+
+        for (auto&& [l, r] : ranges::views::zip(variants, other.variants)) {
+            auto ord = l.first <=> r.first;
+            if (ord != std::strong_ordering::equal) return ord;
+            ord = l.second <=> r.second;
+            if (ord != std::strong_ordering::equal) return ord;
+        }
+
+        return std::strong_ordering::equal;
+    }
 }
